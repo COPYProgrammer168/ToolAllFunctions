@@ -151,7 +151,7 @@ export const SidebarNavigation: React.FC<SidebarNavigationProps> = ({
 
   return (
     <nav className="sticky top-16 z-20 bg-neutral-950/80 backdrop-blur-xl border-b border-white/[0.06]">
-      <div className="mx-auto px-4 sm:px-6 lg:px-8 py-2 flex items-center flex-wrap gap-x-4 gap-y-1.5">
+      <div className="mx-auto px-4 sm:px-6 lg:px-8 py-2 flex items-center flex-nowrap overflow-x-auto gap-x-4 gap-y-1.5 sm:flex-wrap">
         {sections.map((section) => (
           <div key={section.group} className="flex items-center gap-1.5 shrink-0">
             <p className="text-[9px] font-mono font-bold tracking-wider text-neutral-600 uppercase mr-0.5">

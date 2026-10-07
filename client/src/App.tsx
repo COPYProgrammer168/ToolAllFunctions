@@ -251,7 +251,7 @@ function App() {
   const meta = report?.metadata;
 
   return (
-    <div className="min-h-screen flex bg-black text-neutral-100 selection:bg-white/30">
+    <div className="min-h-screen flex flex-col bg-black text-neutral-100 selection:bg-white/30">
       <BackgroundFX />
       <MusicPlayerBar />
       {/* Main App Content Area */}
@@ -668,13 +668,13 @@ function App() {
             <DownloadManagerView onSendToOptimizer={handleSendToOptimizer} />
           )}
         </main>
-
-        <footer className="border-t border-white/[0.05] py-6 text-center text-xs text-neutral-500">
-          <p>
-            &copy; 2026 <span className="text-neutral-400 font-medium">VideoOptimize</span> &mdash; AI Video Optimizer + Media Toolkit.
-          </p>
-        </footer>
       </div>
+
+      <footer className="border-t border-white/[0.05] py-6 text-center text-xs text-neutral-500">
+        <p>
+          &copy; 2026 <span className="text-neutral-400 font-medium">VideoOptimize</span> &mdash; AI Video Optimizer + Media Toolkit.
+        </p>
+      </footer>
 
       {/* Global Settings & Hardware Modal */}
       <MediaSettingsModal
