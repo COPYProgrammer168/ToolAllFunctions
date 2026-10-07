@@ -1,11 +1,13 @@
 import Database from 'better-sqlite3';
 import type { MediaJobRecord } from './MediaJobManager.js';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import fs from 'node:fs';
 
-// Compute a stable base for all storage, overridable via STORAGE_DIR env var.
-// Falls back to ./storage next to the built server.
-const fallbackStorage = path.resolve(__dirname, '../../storage');
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const fallbackStorage = path.resolve(__dirname, '../../../storage');
 export const STORAGE_ROOT = process.env.STORAGE_DIR
   ? path.resolve(process.env.STORAGE_DIR)
   : fallbackStorage;
