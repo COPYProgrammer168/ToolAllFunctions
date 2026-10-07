@@ -26,7 +26,7 @@ RUN npm install --prefix server
 RUN npm install --prefix client
 
 # Install Playwright browsers for TikTok headless fallback
-RUN npx playwright install chromium --quiet
+RUN npx playwright install chromium
 
 # Build client
 RUN npm run build --prefix client
