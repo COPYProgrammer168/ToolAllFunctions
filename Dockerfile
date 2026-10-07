@@ -17,6 +17,9 @@ WORKDIR /app
 # (npm --prefix expects package.json at that path)
 COPY server/package.json ./server/
 COPY client/package.json ./client/
+# Copy TypeScript config files needed for builds
+COPY client/tsconfig.json ./client/
+COPY client/vite.config.ts ./client/
 
 # Install server deps (includes better-sqlite3 native build)
 # Using --prefix so better-sqlite3 compiles with system libs (ffmpeg, python from builder stage)
