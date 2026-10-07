@@ -15,11 +15,8 @@ WORKDIR /app
 
 # Copy package files to their respective directories
 # (npm --prefix expects package.json at that path)
-COPY server/package.json ./server/
-COPY client/package.json ./client/
-# Copy TypeScript config files needed for builds
-COPY client/tsconfig.json ./client/
-COPY client/vite.config.ts ./client/
+COPY server/package*.json ./server/
+COPY client/package*.json ./client/
 
 # Install server deps (includes better-sqlite3 native build)
 # Using --prefix so better-sqlite3 compiles with system libs (ffmpeg, python from builder stage)
@@ -27,6 +24,11 @@ RUN npm install --prefix server
 
 # Install client deps
 RUN npm install --prefix client
+
+COPY server ./server
+COPY client ./client
+
+RUN mkdir -p /app/storage
 
 # Install Playwright browsers for TikTok headless fallback
 RUN npx playwright install chromium
