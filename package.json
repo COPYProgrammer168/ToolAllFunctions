@@ -1,0 +1,16 @@
+{
+  "name": "ai-video-optimizer",
+  "version": "1.0.0",
+  "description": "AI Video Optimizer — Professional Video Enhancement & TikTok Export Tool",
+  "scripts": {
+    "dev": "concurrently \"npm run dev --prefix server\" \"npm run dev --prefix client\"",
+    "dev:server": "npm run dev --prefix server",
+    "dev:client": "npm run dev --prefix client",
+    "build:client": "npm run build --prefix client",
+    "build:server": "npm run build --prefix server",
+    "build": "npm run build:client && npm run build:server"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}

@@ -1,0 +1,51 @@
+services:
+  - type: web
+    name: ai-video-optimizer
+    env: node
+    plan: free
+    buildCommand: |
+      npm install
+      npm install --prefix server
+      npm install --prefix client
+      npm run build --prefix client
+      npm run build --prefix server
+    startCommand: npm run start --prefix server
+    envVars:
+      - key: PORT
+        fromService: ""
+      - key: STORAGE_DIR
+        sync: false
+      - key: JOBS_DB_PATH
+        sync: false
+    # Persistent disk (optional, uncomment to enable):
+    # persistentDisk:
+    #   size: 10GB
+    #   mountPath: /mnt/data
+    # healthCheckPath: /health
+    # restartPolicy: always
+
+services:
+  - type: web
+    name: ai-video-optimizer
+    env: node
+    plan: starter
+    buildCommand: |
+      npm install
+      npm install --prefix server
+      npm install --prefix client
+      npm run build --prefix client
+      npm run build --prefix server
+    startCommand: npm run start --prefix server
+    envVars:
+      - key: PORT
+        fromService: ""
+      - key: STORAGE_DIR
+        sync: false
+      - key: JOBS_DB_PATH
+        sync: false
+    # Optional persistent disk for SQLite + uploads persistence across restarts
+    # persistentDisk:
+    #   size: 10GB
+    #   mountPath: /mnt/data
+    healthCheckPath: /health
+    restartPolicy: always

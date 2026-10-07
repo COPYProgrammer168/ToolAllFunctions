@@ -1,0 +1,300 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-family: 'Rajdhani', 'Space Grotesk', system-ui, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+
+  color-scheme: dark;
+  color: rgba(255, 255, 255, 0.87);
+  background-color: #000000;
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background: #000;
+  overflow-x: hidden;
+}
+
+/* Sci-fi display headings */
+h1, h2, h3, h4, .font-display {
+  font-family: 'Orbitron', 'Rajdhani', sans-serif;
+  letter-spacing: 0.02em;
+}
+
+/* ─── Glassmorphism Base ─── */
+.glass-panel {
+  @apply bg-neutral-950/50 backdrop-blur-xl border border-white/10 shadow-xl;
+}
+
+.glass-card {
+  @apply bg-white/[0.03] backdrop-blur-md border border-white/[0.08] rounded-2xl;
+}
+
+/* ─── Typography & Accents ─── */
+.text-gradient {
+  @apply bg-gradient-to-r from-white via-neutral-300 to-neutral-500 bg-clip-text text-transparent;
+}
+
+.shadow-glow-white {
+  box-shadow: 0 0 24px -6px rgba(255, 255, 255, 0.25);
+}
+
+/* ─── Custom Scrollbar ─── */
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-black;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-neutral-800 rounded-full hover:bg-neutral-700 transition-colors;
+}
+
+/* ─── Layout Utilities ─── */
+.studio-container {
+  @apply max-w-7xl mx-auto px-4 sm:px-6 lg:px-8;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   2027 BACKGROUND — animated blur orbs + 3D perspective grid
+   ═══════════════════════════════════════════════════════════ */
+
+.bg-scene {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+  background: #000;
+  perspective: 900px;
+}
+
+/* Blurred drifting orbs */
+.bg-orb {
+  position: absolute;
+  border-radius: 9999px;
+  filter: blur(90px);
+  opacity: 0.16;
+  will-change: transform, opacity;
+}
+
+@keyframes orbDrift1 {
+  0%   { transform: translate3d(-10%, -10%, 0) scale(1); }
+  50%  { transform: translate3d(15%, 20%, 0) scale(1.35); }
+  100% { transform: translate3d(-10%, -10%, 0) scale(1); }
+}
+@keyframes orbDrift2 {
+  0%   { transform: translate3d(10%, 10%, 0) scale(1.2); }
+  50%  { transform: translate3d(-20%, -15%, 0) scale(0.85); }
+  100% { transform: translate3d(10%, 10%, 0) scale(1.2); }
+}
+@keyframes orbDrift3 {
+  0%   { transform: translate3d(0, 20%, 0) scale(0.9); opacity: 0.10; }
+  50%  { transform: translate3d(-10%, -20%, 0) scale(1.4); opacity: 0.2; }
+  100% { transform: translate3d(0, 20%, 0) scale(0.9); opacity: 0.10; }
+}
+
+/* 3D perspective grid floor */
+.bg-grid-3d {
+  position: absolute;
+  left: -50%;
+  right: -50%;
+  bottom: -20%;
+  height: 60%;
+  background-image:
+    linear-gradient(rgba(255,255,255,0.06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,0.06) 1px, transparent 1px);
+  background-size: 48px 48px;
+  transform: rotateX(62deg);
+  transform-origin: center top;
+  animation: gridScroll 14s linear infinite;
+  mask-image: linear-gradient(to bottom, transparent, black 30%, transparent 95%);
+  -webkit-mask-image: linear-gradient(to bottom, transparent, black 30%, transparent 95%);
+}
+
+@keyframes gridScroll {
+  0%   { background-position: 0 0; }
+  100% { background-position: 0 48px; }
+}
+
+/* Slow rotating 3D wireframe ring */
+.bg-ring-3d {
+  position: absolute;
+  top: 18%;
+  left: 50%;
+  width: 520px;
+  height: 520px;
+  margin-left: -260px;
+  border-radius: 50%;
+  border: 1px solid rgba(255,255,255,0.08);
+  transform-style: preserve-3d;
+  animation: ringSpin 24s linear infinite;
+  filter: blur(0.4px);
+}
+
+.bg-ring-3d::before,
+.bg-ring-3d::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 1px solid rgba(255,255,255,0.06);
+}
+
+.bg-ring-3d::before { transform: rotateX(70deg); }
+.bg-ring-3d::after  { transform: rotateY(70deg); }
+
+@keyframes ringSpin {
+  0%   { transform: rotateX(60deg) rotateZ(0deg); }
+  100% { transform: rotateX(60deg) rotateZ(360deg); }
+}
+
+/* Soft vignette */
+.bg-vignette {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse at 50% 40%, transparent 0%, rgba(0,0,0,0.75) 80%);
+}
+
+/* ─── Hero grid background ─── */
+.hero-grid-bg {
+  background-image:
+    linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px);
+  background-size: 60px 60px;
+}
+
+/* ─── Noise overlay ─── */
+.noise-overlay::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   ANIMATION KEYFRAMES
+   ═══════════════════════════════════════════════════════════ */
+
+@keyframes fadeInUp {
+  0%   { opacity: 0; transform: translateY(28px) scale(0.98); filter: blur(6px); }
+  100% { opacity: 1; transform: translateY(0) scale(1);       filter: blur(0); }
+}
+
+@keyframes fadeIn {
+  0%   { opacity: 0; filter: blur(4px); }
+  100% { opacity: 1; filter: blur(0); }
+}
+
+@keyframes slideInLeft {
+  0%   { opacity: 0; transform: translateX(-40px); filter: blur(4px); }
+  100% { opacity: 1; transform: translateX(0);     filter: blur(0); }
+}
+
+@keyframes slideInRight {
+  0%   { opacity: 0; transform: translateX(40px); filter: blur(4px); }
+  100% { opacity: 1; transform: translateX(0);    filter: blur(0); }
+}
+
+@keyframes scaleIn {
+  0%   { opacity: 0; transform: scale(0.85); filter: blur(8px); }
+  100% { opacity: 1; transform: scale(1);    filter: blur(0); }
+}
+
+@keyframes glowPulse {
+  0%, 100% { box-shadow: 0 0 15px -3px rgba(255, 255, 255, 0.12); }
+  50%      { box-shadow: 0 0 28px -3px rgba(255, 255, 255, 0.28); }
+}
+
+@keyframes textShimmer {
+  0%   { background-position: -200% center; }
+  100% { background-position: 200% center; }
+}
+
+@keyframes float {
+  0%, 100% { transform: translateY(0px) rotate(0deg);  opacity: 0.4; }
+  50%      { transform: translateY(-12px) rotate(6deg); opacity: 0.8; }
+}
+
+@keyframes orbitSpin {
+  0%   { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+@keyframes gradientShift {
+  0%   { background-position: 0% 50%; }
+  50%  { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+@keyframes cardReveal {
+  0%   { opacity: 0; transform: translateY(24px) scale(0.95); filter: blur(4px); }
+  100% { opacity: 1; transform: translateY(0) scale(1);       filter: blur(0); }
+}
+
+@keyframes borderGlow {
+  0%   { border-color: rgba(255, 255, 255, 0.12); }
+  50%  { border-color: rgba(255, 255, 255, 0.35); }
+  100% { border-color: rgba(255, 255, 255, 0.12); }
+}
+
+.anim-fade-in-up  { animation: fadeInUp 0.8s cubic-bezier(0.16, 1, 0.3, 1) forwards; opacity: 0; }
+.anim-fade-in     { animation: fadeIn 0.7s cubic-bezier(0.16, 1, 0.3, 1) forwards; opacity: 0; }
+.anim-slide-left  { animation: slideInLeft 0.7s cubic-bezier(0.16, 1, 0.3, 1) forwards; opacity: 0; }
+.anim-slide-right { animation: slideInRight 0.7s cubic-bezier(0.16, 1, 0.3, 1) forwards; opacity: 0; }
+.anim-scale-in    { animation: scaleIn 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards; opacity: 0; }
+.anim-glow-pulse  { animation: glowPulse 3s ease-in-out infinite; }
+
+.anim-text-shimmer {
+  background-size: 200% auto;
+  animation: textShimmer 4s linear infinite;
+}
+
+.anim-float        { animation: float 4s ease-in-out infinite; }
+.anim-orbit        { animation: orbitSpin 20s linear infinite; }
+.anim-gradient-shift { background-size: 200% 200%; animation: gradientShift 6s ease infinite; }
+.anim-card-reveal  { animation: cardReveal 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards; opacity: 0; }
+.anim-border-glow  { animation: borderGlow 4s ease-in-out infinite; }
+
+.delay-0 { animation-delay: 0ms; }
+.delay-100 { animation-delay: 100ms; }
+.delay-150 { animation-delay: 150ms; }
+.delay-200 { animation-delay: 200ms; }
+.delay-300 { animation-delay: 300ms; }
+.delay-400 { animation-delay: 400ms; }
+.delay-500 { animation-delay: 500ms; }
+.delay-600 { animation-delay: 600ms; }
+.delay-700 { animation-delay: 700ms; }
+.delay-800 { animation-delay: 800ms; }
+.delay-900 { animation-delay: 900ms; }
+.delay-1000 { animation-delay: 1000ms; }
+.delay-1100 { animation-delay: 1100ms; }
+.delay-1200 { animation-delay: 1200ms; }
+.delay-1300 { animation-delay: 1300ms; }
+.delay-1400 { animation-delay: 1400ms; }
+
+@keyframes pulse-soft {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.7; }
+}
+
+.animate-pulse-soft {
+  animation: pulse-soft 3s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+.no-scrollbar::-webkit-scrollbar{display:none}
+.no-scrollbar{scrollbar-width:none}
+
