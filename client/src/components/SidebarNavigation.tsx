@@ -12,6 +12,7 @@ import {
   Download,
   Settings,
   Grid,
+  Menu as MenuIcon,
 } from 'lucide-react';
 import type { AppNavSection } from '../types';
 
@@ -29,9 +30,18 @@ interface SidebarNavigationProps {
   activeJobsCount?: number;
 }
 
+function getItemClasses(isActive: boolean): string {
+  if (isActive) {
+    return 'bg-gradient-to-r from-white/15 to-neutral-400/10 border-white/20';
+  }
+  return 'border-transparent hover:bg-white/[0.05]';
+}
+
 export const SidebarNavigation: React.FC<SidebarNavigationProps> = ({
   activeSection,
   onSelectSection,
+  isOpenMobile,
+  onToggleMobile,
   activeJobsCount = 0,
 }) => {
   const sections = [
@@ -137,6 +147,57 @@ export const SidebarNavigation: React.FC<SidebarNavigationProps> = ({
     },
   ];
 
+  // Mobile: show full-width collapsible menu; Desktop: show sticky nav
+  if (isOpenMobile) {
+    return (
+      <nav className="fixed inset-0 z-50 bg-neutral-950/95 backdrop-blur-xl border-y border-white/[0.06] pb-8">
+        <div className="flex flex-col h-full p-6 pt-20 gap-6">
+          {/* Close button */}
+          <button
+            onClick={onToggleMobile}
+            className="absolute top-4 left-4 p-2 rounded-xl bg-white/5 hover:bg-white/10 text-neutral-300 transition-colors"
+            aria-label="Close menu"
+          >
+            <MenuIcon className="w-6 h-6" />
+          </button>
+
+          {/* Sections */}
+          {sections.map((section) => (
+            <div key={section.group} className="space-y-2">
+              <p className="text-xs font-mono font-bold tracking-wider text-neutral-600 uppercase">
+                {section.group}
+              </p>
+              {section.items.map((item) => {
+                const Icon = item.icon;
+                const isActive = activeSection === item.id;
+                return (
+                  <button
+                    key={item.id}
+                    onClick={() => onSelectSection(item.id)}
+                    className={`w-full px-3 py-2.5 rounded-lg text-base font-medium flex items-center gap-3 whitespace-nowrap transition-all border ${
+                      isActive
+                        ? 'bg-gradient-to-r from-white/15 to-neutral-400/10 border-white/20 text-white'
+                        : 'border-transparent hover:bg-white/[0.05] text-neutral-200'
+                    }`}
+                  >
+                    <Icon className={`w-4 h-4 mr-3 ${item.accent}`} />
+                    <span className={item.accent}>{item.label}</span>
+                    {item.badge !== undefined && (
+                      <span className="ml-auto px-1.5 py-0.2 rounded-full text-[10px] font-mono font-bold bg-white text-neutral-950">
+                        {item.badge}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          ))}
+        </div>
+      </nav>
+    );
+  }
+
+  // Desktop: original sticky navigation
   return (
     <nav className="sticky top-16 z-20 bg-neutral-950/80 backdrop-blur-xl border-b border-white/[0.06]">
       <div className="w-full px-4 sm:px-6 lg:px-8 py-2 flex items-center flex-wrap gap-x-4 gap-y-1.5">
@@ -152,11 +213,7 @@ export const SidebarNavigation: React.FC<SidebarNavigationProps> = ({
                 <button
                   key={item.id}
                   onClick={() => onSelectSection(item.id)}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 whitespace-nowrap transition-all border ${
-                    isActive
-                      ? 'bg-gradient-to-r from-white/15 to-neutral-400/10 border-white/20'
-                      : 'border-transparent hover:bg-white/[0.05]'
-                  }`}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 whitespace-nowrap transition-all border ${getItemClasses(isActive)}`}
                 >
                   <Icon className={`w-3.5 h-3.5 ${item.accent}`} />
                   <span className={item.accent}>{item.label}</span>
@@ -174,4 +231,3 @@ export const SidebarNavigation: React.FC<SidebarNavigationProps> = ({
     </nav>
   );
 };
-

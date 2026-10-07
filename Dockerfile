@@ -13,12 +13,10 @@ RUN apk add --no-cache \
 # Set working directory
 WORKDIR /app
 
-# Copy package files
-COPY server/package*.json ./
-COPY client/package*.json ./client/
-
-# Install root dependencies first (so better-sqlite3 compiles with system libs)
-RUN npm install
+# Copy package files to their respective directories
+# (npm --prefix expects package.json at that path)
+COPY server/package.json ./server/
+COPY client/package.json ./client/
 
 # Install server deps (includes better-sqlite3 native build)
 RUN npm install --prefix server
