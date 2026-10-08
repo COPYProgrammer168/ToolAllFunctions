@@ -277,6 +277,7 @@ function App() {
             } else {
               setActiveSection(sec);
             }
+            setIsSidebarOpen(false);
           }}
           isOpenMobile={isSidebarOpen}
           onToggleMobile={() => setIsSidebarOpen((prev) => !prev)}

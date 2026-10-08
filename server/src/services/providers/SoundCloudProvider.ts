@@ -9,8 +9,13 @@ export class SoundCloudProvider implements IMediaProvider {
   }
 
   public async analyze(url: string): Promise<MediaAnalysisResult> {
+    // Playlist pages (e.g. /artist/sets/playlist-name)
+    if (/^https?:\/\/(www\.|m\.)?soundcloud\.com\/[\w-]+\/sets\/[\w-]+\/?(\?.*)?$/i.test(url)) {
+      return this.analyzePlaylist(url);
+    }
+
     // Profile / user listing pages (e.g. /artist or /artist/tracks)
-    if (/^https?:\/\/(www\.|m\.)?soundcloud\.com\/[\w-]+\/?(tracks|sets|likes|reposts)?\/?(\?.*)?$/i.test(url)) {
+    if (/^https?:\/\/(www\.|m\.)?soundcloud\.com\/[\w-]+\/?(tracks|likes|reposts)?\/?(\?.*)?$/i.test(url)) {
       return this.analyzeProfileTracks(url);
     }
 
@@ -278,6 +283,237 @@ export class SoundCloudProvider implements IMediaProvider {
       mediaType: 'audio',
       downloadAuthorized: false,
       authorizedNotice: 'This is a SoundCloud profile/tracks page. Pick a track below to inspect and download it.',
+      copyrightNotice:
+        'SoundCloud streams are protected by artist copyright. Only download tracks you own or that the artist has made publicly accessible.',
+      availableFormats: [],
+      tracks,
+    };
+  }
+
+  private async analyzePlaylist(url: string): Promise<MediaAnalysisResult> {
+    let title = 'SoundCloud Playlist';
+    let author = 'Unknown Artist';
+    let thumbnail = '';
+    const tracks: { title: string; url: string; creator?: string; duration?: number; thumbnail?: string }[] = [];
+
+    try {
+      const pageRes = await fetch(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.9',
+        },
+        redirect: 'follow',
+        signal: AbortSignal.timeout(10000),
+      });
+
+      let clientId: string | undefined;
+      if (pageRes.ok) {
+        const html = await pageRes.text();
+        const hydrationMatch = html.match(/window\.__sc_hydration\s*=\s*(\[[\s\S]*?\]);<\/script>/);
+        if (hydrationMatch) {
+          try {
+            const entries = JSON.parse(hydrationMatch[1]) as any[];
+            const apiClient = entries.find((d) => d.hydratable === 'apiClient')?.data;
+            clientId = apiClient?.id;
+          } catch {}
+        }
+      }
+
+      if (!clientId) {
+        return {
+          sourceUrl: url,
+          platform: 'soundcloud',
+          title,
+          creator: author,
+          thumbnail,
+          duration: 0,
+          mediaType: 'audio',
+          downloadAuthorized: false,
+          authorizedNotice: 'Could not resolve playlist. The playlist may be private or the URL is invalid.',
+          copyrightNotice:
+            'SoundCloud streams are protected by artist copyright. Only download tracks you own or that the artist has made publicly accessible.',
+          availableFormats: [],
+          tracks,
+        };
+      }
+
+      const resolveUrl = `https://api-v2.soundcloud.com/resolve?url=${encodeURIComponent(url)}&client_id=${clientId}`;
+      const apiRes = await fetch(resolveUrl, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+        signal: AbortSignal.timeout(10000),
+      });
+
+      if (apiRes.ok) {
+        const playlist = (await apiRes.json()) as any;
+        if (playlist.title) title = playlist.title;
+        if (playlist.user?.username) author = playlist.user.username;
+        if (playlist.artwork_url) thumbnail = playlist.artwork_url;
+
+        const tracksFromResolve: { title: string; url: string; creator?: string; duration?: number; thumbnail?: string }[] = [];
+        const playlistTracks = Array.isArray(playlist.tracks) ? playlist.tracks : [];
+        for (const t of playlistTracks) {
+          if (t?.permalink_url && t?.title) {
+            tracksFromResolve.push({
+              title: t.title,
+              url: t.permalink_url,
+              creator: t.user?.username,
+              duration: typeof t.duration === 'number' ? Math.round(t.duration / 1000) : undefined,
+              thumbnail: t.artwork_url || undefined,
+            });
+          }
+        }
+        tracks.push(...tracksFromResolve);
+
+        const playlistId = playlist.id;
+        if (typeof playlistId === 'number') {
+          const baseParams = `client_id=${clientId}&limit=200&linked_partitioning=1&app_version=1751368616&app_locale=en`;
+          const pageUrl = `https://api-v2.soundcloud.com/playlists/${playlistId}/tracks?${baseParams}`;
+          let next: string | undefined = pageUrl;
+          const seen = new Set<string>(tracksFromResolve.map((t) => t.url));
+          let pages = 0;
+          while (next && pages < 20) {
+            pages++;
+            const pageRes = await fetch(next, {
+              headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+              signal: AbortSignal.timeout(10000),
+            });
+            if (!pageRes.ok) {
+              break;
+            }
+            const pageJson = (await pageRes.json()) as any;
+            const coll: any[] = Array.isArray(pageJson.collection)
+              ? pageJson.collection
+              : Array.isArray(pageJson)
+                ? pageJson
+                : [];
+            for (const t of coll) {
+              if (t?.permalink_url && t?.title && !seen.has(t.permalink_url)) {
+                seen.add(t.permalink_url);
+                tracks.push({
+                  title: t.title,
+                  url: t.permalink_url,
+                  creator: t.user?.username,
+                  duration: typeof t.duration === 'number' ? Math.round(t.duration / 1000) : undefined,
+                  thumbnail: t.artwork_url || undefined,
+                });
+              }
+            }
+            const rawNext = pageJson.next_href || pageJson.next || undefined;
+            if (typeof rawNext === 'string' && rawNext.length > 0) {
+              if (!rawNext.includes('client_id=')) {
+                const separator = rawNext.includes('?') ? '&' : '?';
+                next = `${rawNext}${separator}${baseParams}`;
+              } else {
+                next = rawNext;
+              }
+              if (next.startsWith('/')) {
+                next = `https://api-v2.soundcloud.com${next}`;
+              }
+            } else {
+              next = undefined;
+            }
+          }
+        }
+      }
+    } catch {
+      // fetch failed
+    }
+
+    if (tracks.length === 0) {
+      try {
+        const pageRes2 = await fetch(url, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+          },
+          redirect: 'follow',
+          signal: AbortSignal.timeout(10000),
+        });
+        if (pageRes2.ok) {
+          const html = await pageRes2.text();
+          const seen = new Set<string>(tracks.map((t) => t.url));
+
+          const extractFromNode = (node: any) => {
+            if (!node || typeof node !== 'object') return;
+            if (Array.isArray(node)) {
+              node.forEach(extractFromNode);
+              return;
+            }
+            if (node.kind === 'track' && node.permalink_url && node.title && !seen.has(node.permalink_url)) {
+              seen.add(node.permalink_url);
+              tracks.push({
+                title: node.title,
+                url: node.permalink_url,
+                creator: node.user?.username,
+                duration: typeof node.duration === 'number' ? Math.round(node.duration / 1000) : undefined,
+                thumbnail: node.artwork_url || undefined,
+              });
+            }
+            Object.values(node).forEach(extractFromNode);
+          };
+
+          const hydrationMatch = html.match(/window\.__sc_hydration\s*=\s*(\[[\s\S]*?\]);<\/script>/);
+          if (hydrationMatch) {
+            try {
+              const entries = JSON.parse(hydrationMatch[1]) as any[];
+              extractFromNode(entries);
+            } catch {
+              // parse failed
+            }
+          }
+
+          if (tracks.length === 0) {
+            const jsonMatches = html.matchAll(/\{(?:[^{}]|\{[^{}]*\})*"kind"\s*:\s*"track"(?:[^{}]|\{[^{}]*\})*\}/g);
+            for (const m of jsonMatches) {
+              try {
+                const node = JSON.parse(m[0]);
+                if (node.permalink_url && node.title && !seen.has(node.permalink_url)) {
+                  seen.add(node.permalink_url);
+                  tracks.push({
+                    title: node.title,
+                    url: node.permalink_url,
+                    creator: node.user?.username,
+                    duration: typeof node.duration === 'number' ? Math.round(node.duration / 1000) : undefined,
+                    thumbnail: node.artwork_url || undefined,
+                  });
+                }
+              } catch {
+                // parse failed
+              }
+            }
+          }
+
+          if (tracks.length === 0) {
+            const trackUrlMatches = html.matchAll(/https?:\/\/soundcloud\.com\/([\w-]+)\/([\w-]+)/g);
+            for (const m of trackUrlMatches) {
+              const trackUrl = m[0];
+              if (!seen.has(trackUrl)) {
+                seen.add(trackUrl);
+                tracks.push({ title: m[2].replace(/-/g, ' '), url: trackUrl });
+              }
+            }
+          }
+        }
+      } catch {
+        // page extraction fallback failed
+      }
+    }
+
+    return {
+      sourceUrl: url,
+      platform: 'soundcloud',
+      title: `${author} — ${title}`,
+      creator: author,
+      thumbnail,
+      duration: 0,
+      mediaType: 'audio',
+      downloadAuthorized: false,
+      authorizedNotice:
+        tracks.length > 0
+          ? 'This is a SoundCloud playlist. Pick a track below to inspect and download it.'
+          : 'Could not load playlist tracks. The playlist may be empty or private.',
       copyrightNotice:
         'SoundCloud streams are protected by artist copyright. Only download tracks you own or that the artist has made publicly accessible.',
       availableFormats: [],

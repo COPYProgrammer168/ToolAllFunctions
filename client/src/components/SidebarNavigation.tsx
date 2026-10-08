@@ -33,6 +33,8 @@ interface SidebarNavigationProps {
 export const SidebarNavigation: React.FC<SidebarNavigationProps> = ({
   activeSection,
   onSelectSection,
+  isOpenMobile,
+  onToggleMobile,
   activeJobsCount = 0,
 }) => {
   const sections = [
@@ -150,10 +152,10 @@ export const SidebarNavigation: React.FC<SidebarNavigationProps> = ({
   ];
 
   return (
-    <nav className="sticky top-16 z-20 bg-neutral-950/80 backdrop-blur-xl border-b border-white/[0.06]">
-      <div className="mx-auto px-4 sm:px-6 lg:px-8 py-2 flex items-center flex-nowrap overflow-x-auto gap-x-4 gap-y-1.5 sm:flex-wrap">
+    <nav className={`sticky top-16 z-20 bg-neutral-950/95 backdrop-blur-xl border-b border-white/[0.06] lg:block ${isOpenMobile ? 'block' : 'hidden'}`}>
+      <div className="mx-auto px-4 sm:px-6 lg:px-8 py-2 flex flex-col gap-y-3 lg:flex-row lg:flex-wrap lg:gap-x-6 lg:gap-y-2">
         {sections.map((section) => (
-          <div key={section.group} className="flex items-center gap-1.5 shrink-0">
+          <div key={section.group} className="flex flex-col gap-y-1 lg:flex-row lg:items-center lg:gap-1.5 shrink-0">
             <p className="text-[9px] font-mono font-bold tracking-wider text-neutral-600 uppercase mr-0.5">
               {section.group}
             </p>
