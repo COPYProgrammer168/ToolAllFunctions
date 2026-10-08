@@ -174,6 +174,10 @@ export async function startMediaDownload(params: {
   type?: string;
   format?: string;
   customBitrate?: number;
+  /** Adaptive video-only URL (muxed with audioUrl server-side when present). */
+  videoUrl?: string;
+  /** Matching audio-only URL, used together with videoUrl. */
+  audioUrl?: string;
 }): Promise<{ jobId: string; status: string; filename: string }> {
   const res = await fetch('/api/media/download', {
     method: 'POST',

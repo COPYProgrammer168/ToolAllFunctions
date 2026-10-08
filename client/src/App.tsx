@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Play, Download, Sparkles } from 'lucide-react';
+import { Play, Pause, Download, Sparkles } from 'lucide-react';
 import { Navbar } from './components/Navbar';
 import { BackgroundFX } from './components/BackgroundFX';
 import { MusicPlayerBar } from './components/MusicPlayerBar';
@@ -88,6 +88,9 @@ function App() {
   });
   const [activeTab, setActiveTab] = useState<'optimize' | 'compare' | 'inspect'>('optimize');
   const previewVideoRef = useRef<HTMLVideoElement>(null);
+  const [previewPlaying, setPreviewPlaying] = useState(false);
+  const [previewTime, setPreviewTime] = useState(0);
+  const [previewDuration, setPreviewDuration] = useState(0);
 
   useEffect(() => {
     fetchHardwareInfo().then(setHardware).catch(console.error);
@@ -456,8 +459,12 @@ function App() {
                               }}
                               className="px-4 py-2 rounded-xl bg-white/20 border border-white/30 text-white text-xs font-semibold hover:bg-white/30 transition-all flex items-center gap-2"
                             >
-                              <Play className="w-3.5 h-3.5" />
-                              {previewVideoRef.current?.paused ? 'Play' : 'Pause'}
+                              {previewPlaying ? (
+                                <Pause className="w-3.5 h-3.5" />
+                              ) : (
+                                <Play className="w-3.5 h-3.5" />
+                              )}
+                              {previewPlaying ? 'Pause' : 'Play'}
                             </button>
                             <a
                               href={jobProgress.outputUrl}
@@ -473,9 +480,55 @@ function App() {
                             ref={previewVideoRef}
                             src={`/api/jobs/${currentJobId}/output`}
                             className="w-full h-full object-contain"
-                            controls
                             playsInline
+                            onError={() => setPreviewPlaying(false)}
+                            onPlay={() => setPreviewPlaying(true)}
+                            onPause={() => setPreviewPlaying(false)}
+                            onEnded={() => setPreviewPlaying(false)}
+                            onLoadedMetadata={(e) =>
+                              setPreviewDuration(e.currentTarget.duration || 0)
+                            }
+                            onTimeUpdate={(e) =>
+                              setPreviewTime(e.currentTarget.currentTime)
+                            }
                           />
+                        </div>
+                        <div className="p-3 flex items-center gap-3 bg-black/40 border-t border-white/5">
+                          <button
+                            onClick={() => {
+                              const video = previewVideoRef.current;
+                              if (!video) return;
+                              video.paused ? video.play() : video.pause();
+                            }}
+                            className="p-2 rounded-lg bg-white/10 border border-white/20 hover:bg-white/20 text-white transition-all"
+                            aria-label={previewPlaying ? 'Pause' : 'Play'}
+                          >
+                            {previewPlaying ? (
+                              <Pause className="w-4 h-4" />
+                            ) : (
+                              <Play className="w-4 h-4" />
+                            )}
+                          </button>
+                          <span className="text-[11px] text-neutral-400 font-mono w-10 text-right">
+                            {formatPreviewTime(previewTime)}
+                          </span>
+                          <input
+                            type="range"
+                            min={0}
+                            max={previewDuration || 0}
+                            step={0.1}
+                            value={previewTime}
+                            onChange={(e) => {
+                              const t = Number(e.target.value);
+                              setPreviewTime(t);
+                              if (previewVideoRef.current)
+                                previewVideoRef.current.currentTime = t;
+                            }}
+                            className="flex-1 accent-emerald-400 h-1.5 cursor-pointer"
+                          />
+                          <span className="text-[11px] text-neutral-400 font-mono w-10">
+                            {formatPreviewTime(previewDuration)}
+                          </span>
                         </div>
                       </div>
 
@@ -685,6 +738,13 @@ function App() {
     </div>
   );
 }
+
+const formatPreviewTime = (seconds: number): string => {
+  if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${s.toString().padStart(2, '0')}`;
+};
 
 const SummaryRow: React.FC<{ label: string; value: string }> = ({ label, value }) => (
   <div className="flex items-center justify-between py-2 border-b border-white/5 last:border-0">

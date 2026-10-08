@@ -12,13 +12,18 @@ export interface MediaFormatOption {
   notes?: string;
 }
 
-export interface SoundCloudTrackInfo {
+export interface MediaTrackInfo {
   title: string;
   url: string;
   creator?: string;
   duration?: number;
   thumbnail?: string;
+  /** Hint for list UIs (video channels vs audio playlists) */
+  mediaType?: 'video' | 'audio';
 }
+
+/** @deprecated Use MediaTrackInfo */
+export type SoundCloudTrackInfo = MediaTrackInfo;
 
 export interface MediaAnalysisResult {
   sourceUrl: string;
@@ -40,8 +45,14 @@ export interface MediaAnalysisResult {
   authorizedNotice?: string;
   availableFormats: MediaFormatOption[];
   rawSourceUrl?: string;
+  /** Best muxed (audio+video) stream, if one exists. */
+  rawMuxedUrl?: string;
+  /** Best adaptive video-only stream URL (needs muxing for full A/V). */
+  rawVideoUrl?: string;
+  /** Best audio-only stream URL. */
+  rawAudioUrl?: string;
   copyrightNotice?: string;
-  tracks?: SoundCloudTrackInfo[];
+  tracks?: MediaTrackInfo[];
 }
 
 export interface IMediaProvider {

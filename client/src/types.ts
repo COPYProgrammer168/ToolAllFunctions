@@ -182,8 +182,21 @@ export interface MediaAnalysisResult {
   authorizedNotice?: string;
   availableFormats: MediaFormatOption[];
   rawSourceUrl?: string;
+  /** Best muxed (audio+video) stream, if one exists. */
+  rawMuxedUrl?: string;
+  /** Best adaptive video-only stream URL. */
+  rawVideoUrl?: string;
+  /** Best audio-only stream URL. */
+  rawAudioUrl?: string;
   copyrightNotice?: string;
-  tracks?: { title: string; url: string; creator?: string; duration?: number; thumbnail?: string }[];
+  tracks?: {
+    title: string;
+    url: string;
+    creator?: string;
+    duration?: number;
+    thumbnail?: string;
+    mediaType?: 'video' | 'audio';
+  }[];
 }
 
 export type MediaJobType = 'video' | 'audio' | 'image' | 'converter' | 'watermark' | 'outro';

@@ -265,6 +265,94 @@ apiRouter.post('/media/analyze', async (req, res) => {
         });
     }
 });
+// B2. Streaming proxy for platform CDN URLs that require special headers
+// (notably TikTok) during <video> preview playback. Supports HTTP Range.
+apiRouter.get('/media/stream', async (req, res) => {
+    try {
+        const target = req.query.url;
+        if (!target || !/^https?:\/\//i.test(target)) {
+            return res.status(400).json({ error: 'A valid url is required.' });
+        }
+        const headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        };
+        if (/tiktok|tikcdn/i.test(target)) {
+            headers['Referer'] = 'https://www.tiktok.com/';
+            headers['Origin'] = 'https://www.tiktok.com';
+        }
+        if (typeof req.headers.range === 'string') {
+            headers['Range'] = req.headers.range;
+        }
+        const upstream = await fetch(target, { headers });
+        if (!upstream.ok && upstream.status !== 206) {
+            return res.status(upstream.status).send(`Upstream returned ${upstream.status}`);
+        }
+        res.status(upstream.status);
+        const contentType = upstream.headers.get('content-type');
+        if (contentType)
+            res.setHeader('Content-Type', contentType);
+        const len = upstream.headers.get('content-length');
+        if (len)
+            res.setHeader('Content-Length', len);
+        const cr = upstream.headers.get('content-range');
+        if (cr)
+            res.setHeader('Content-Range', cr);
+        res.setHeader('Accept-Ranges', 'bytes');
+        const body = upstream.body;
+        if (!body)
+            return res.status(502).send('No upstream body');
+        // Node >= 18 web stream reader
+        const reader = body.getReader();
+        const pump = async () => {
+            const { done, value } = await reader.read();
+            if (done) {
+                res.end();
+                return;
+            }
+            res.write(Buffer.from(value));
+            return pump();
+        };
+        return pump();
+    }
+    catch (err) {
+        res.status(500).json({ error: err.message || 'Proxy failed' });
+    }
+});
+// B1. Live-mux an adaptive video URL with its audio counterpart for in-browser
+// preview playback when the provider only has separate video/audio streams.
+apiRouter.get('/media/merge-preview', async (req, res) => {
+    const v = req.query.v;
+    const a = req.query.a;
+    if (!v || !a) {
+        return res.status(400).json({ error: 'Both v and a query params are required.' });
+    }
+    try {
+        const { exec: execCb } = await import('node:child_process');
+        const { promisify } = await import('node:util');
+        const execAsync = promisify(execCb);
+        const tmpDir = path.resolve(__dirname, '../../storage/tmp');
+        await fs.mkdir(tmpDir, { recursive: true });
+        const id = `${Date.now()}_${nanoid(6)}`;
+        const videoTmp = path.join(tmpDir, `pv_${id}.bin`);
+        const audioTmp = path.join(tmpDir, `pa_${id}.bin`);
+        const merged = path.join(tmpDir, `pm_${id}.mp4`);
+        const ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36';
+        await Promise.all([
+            execAsync(`curl.exe -sL -A "${ua}" -o "${videoTmp}" "${v}"`),
+            execAsync(`curl.exe -sL -A "${ua}" -o "${audioTmp}" "${a}"`),
+        ]);
+        await execAsync(`ffmpeg -y -i "${videoTmp}" -i "${audioTmp}" -c:v copy -c:a aac -movflags +faststart "${merged}"`);
+        await fs.unlink(videoTmp).catch(() => { });
+        await fs.unlink(audioTmp).catch(() => { });
+        res.setHeader('Content-Type', 'video/mp4');
+        const stream = createReadStream(merged);
+        stream.pipe(res);
+        stream.on('close', () => fs.unlink(merged).catch(() => { }));
+    }
+    catch (err) {
+        res.status(500).json({ error: err.message || 'Merge failed' });
+    }
+});
 // B0. Probe a remote stream's real audio bitrate via ffprobe
 apiRouter.post('/media/probe-bitrate', async (req, res) => {
     try {
@@ -304,17 +392,35 @@ apiRouter.post('/media/download', async (req, res) => {
         // When the client only has a platform page URL (no direct stream URL),
         // resolve the real downloadable stream server-side before starting the job.
         let downloadTargetUrl = directUrl || sourceUrl;
-        if (!directUrl && sourceUrl && !/\.(mp4|webm|mov|mkv|avi|m4v|mp3|m4a|wav|flac|aac|ogg|jpg|jpeg|png|webp|avif|gif)(\?|$)/i.test(sourceUrl)) {
+        let muxUrls = null;
+        // Explicit adaptive video+audio pair -> mux with ffmpeg.
+        if (type === 'video' && req.body.videoUrl && req.body.audioUrl) {
+            muxUrls = { video: req.body.videoUrl, audio: req.body.audioUrl };
+            downloadTargetUrl = req.body.videoUrl;
+        }
+        if (!muxUrls && !directUrl && sourceUrl && !/\.(mp4|webm|mov|mkv|avi|m4v|mp3|m4a|wav|flac|aac|ogg|jpg|jpeg|png|webp|avif|gif)(\?|$)/i.test(sourceUrl)) {
             try {
                 const resolved = await MediaSourceResolver.resolveAndAnalyze(sourceUrl);
-                const direct = resolved.rawSourceUrl ||
-                    resolved.availableFormats.find((f) => f.directDownloadUrl)?.directDownloadUrl;
-                if (!direct) {
-                    return res.status(400).json({
-                        error: 'Could not resolve a direct downloadable stream for this URL (private, region-locked, or DRM protected).',
-                    });
+                if (type === 'video' && !resolved.rawMuxedUrl && resolved.rawVideoUrl && resolved.rawAudioUrl) {
+                    muxUrls = { video: resolved.rawVideoUrl, audio: resolved.rawAudioUrl };
+                    downloadTargetUrl = resolved.rawVideoUrl;
                 }
-                downloadTargetUrl = direct;
+                else {
+                    const direct = type === 'audio'
+                        ? resolved.rawAudioUrl ||
+                            resolved.rawMuxedUrl ||
+                            resolved.rawSourceUrl ||
+                            resolved.availableFormats.find((f) => f.type === 'audio' && f.directDownloadUrl)?.directDownloadUrl
+                        : resolved.rawMuxedUrl ||
+                            resolved.rawVideoUrl ||
+                            resolved.availableFormats.find((f) => f.type === 'video' && f.directDownloadUrl)?.directDownloadUrl;
+                    if (!direct) {
+                        return res.status(400).json({
+                            error: 'Could not resolve a direct downloadable stream for this URL (private, region-locked, or DRM protected).',
+                        });
+                    }
+                    downloadTargetUrl = direct;
+                }
             }
             catch (err) {
                 return res.status(400).json({ error: err.message || 'Failed to resolve media URL.' });
@@ -333,7 +439,29 @@ apiRouter.post('/media/download', async (req, res) => {
         // Asynchronously begin streaming download and conversion
         (async () => {
             try {
-                const downloadedSource = await MediaJobManager.startResumableDownload(job.id, downloadTargetUrl);
+                let downloadedSource;
+                if (muxUrls) {
+                    // googlevideo CDN rejects plain ffmpeg HTTP probes, so download via
+                    // curl (which sends the required Range request) then mux locally.
+                    const { exec: execCb } = await import('node:child_process');
+                    const { promisify } = await import('node:util');
+                    const execAsync = promisify(execCb);
+                    const jobDir = job.outputPath.replace(/[\\/][^\\/]+$/, '');
+                    const videoTmp = path.join(jobDir, `tmp_video_${job.id}.bin`);
+                    const audioTmp = path.join(jobDir, `tmp_audio_${job.id}.bin`);
+                    const ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36';
+                    await Promise.all([
+                        execAsync(`curl.exe -sL -A "${ua}" -o "${videoTmp}" "${muxUrls.video}"`),
+                        execAsync(`curl.exe -sL -A "${ua}" -o "${audioTmp}" "${muxUrls.audio}"`),
+                    ]);
+                    await execAsync(`ffmpeg -y -i "${videoTmp}" -i "${audioTmp}" -c:v copy -c:a aac -movflags +faststart "${job.outputPath}"`);
+                    await fs.unlink(videoTmp).catch(() => { });
+                    await fs.unlink(audioTmp).catch(() => { });
+                    downloadedSource = job.outputPath;
+                }
+                else {
+                    downloadedSource = await MediaJobManager.startResumableDownload(job.id, downloadTargetUrl);
+                }
                 MediaJobManager.emitProgress(job.id, {
                     status: 'CONVERTING',
                     stageName: 'Processing media...',
@@ -360,7 +488,10 @@ apiRouter.post('/media/download', async (req, res) => {
                 }
                 else {
                     // Video: copy directly (already in target format)
-                    if (format === 'original' || downloadedSource.endsWith(`.${format}`) || format === 'mp4') {
+                    if (muxUrls) {
+                        // Already muxed to job.outputPath by ffmpeg above.
+                    }
+                    else if (format === 'original' || downloadedSource.endsWith(`.${format}`) || format === 'mp4') {
                         await fs.copyFile(downloadedSource, job.outputPath);
                     }
                     else {

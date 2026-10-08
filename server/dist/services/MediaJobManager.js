@@ -185,7 +185,7 @@ export class MediaJobManager {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         };
         // TikTok CDN rejects requests without a TikTok referer
-        if (/tiktok(cdn|v)?\.|tikcdn\./i.test(remoteUrl)) {
+        if (/tiktok|tikcdn/i.test(remoteUrl)) {
             reqHeaders['Referer'] = 'https://www.tiktok.com/';
             reqHeaders['Origin'] = 'https://www.tiktok.com';
         }

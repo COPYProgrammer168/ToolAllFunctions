@@ -14,6 +14,7 @@ import {
   Copy,
   Play,
   Pause,
+  X,
 } from 'lucide-react';
 import type { MediaAnalysisResult, MediaFormatOption } from '../types';
 import { analyzeMediaUrl, startMediaDownload, probeStreamBitrate } from '../services/api';
@@ -28,6 +29,8 @@ interface UniversalMediaInputProps {
   audioActionLabel?: string;
   onDirectDownload?: (format: MediaFormatOption) => void;
 }
+
+type BulkDownloadType = 'video' | 'audio';
 
 export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
   onMediaSelect,
@@ -49,16 +52,30 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
   const [loadingPlayUrl, setLoadingPlayUrl] = useState<string | null>(null);
   const [trackBitrates, setTrackBitrates] = useState<Record<string, number>>({});
   const [selectedTracks, setSelectedTracks] = useState<Set<string>>(new Set());
+  const [bulkDownloadType, setBulkDownloadType] = useState<BulkDownloadType>('video');
+  const [cardPreviewUrl, setCardPreviewUrl] = useState<string | null>(null);
+  const [cardPreviewStream, setCardPreviewStream] = useState<string | null>(null);
+  const [cardPreviewLoading, setCardPreviewLoading] = useState<string | null>(null);
   const { playing: isPlaying, currentId } = usePlayer();
+
+  const isVideoPlatformList =
+    !!analysis?.tracks?.length &&
+    (analysis.platform === 'youtube' || analysis.platform === 'tiktok' || analysis.mediaType === 'mixed');
 
   // Reset selection when a new analysis arrives
   React.useEffect(() => {
     setSelectedTracks(new Set());
+    setCardPreviewUrl(null);
+    setCardPreviewStream(null);
+    setBulkDownloadType(
+      analysis?.platform === 'soundcloud' || analysis?.mediaType === 'audio' ? 'audio' : 'video'
+    );
   }, [analysis]);
 
-  // Lazily probe each listed track's real source bitrate (real > 320)
+  // Lazily probe each listed track's real source bitrate (SoundCloud audio lists)
   React.useEffect(() => {
     if (!analysis?.tracks?.length) return;
+    if (analysis.platform !== 'soundcloud' && analysis.mediaType !== 'audio') return;
     let cancelled = false;
     const tracks = analysis.tracks;
     const concurrency = 3;
@@ -98,7 +115,47 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
     }
   };
 
+  const handleCardVideoPreview = async (track: { title: string; url: string }) => {
+    if (cardPreviewUrl === track.url && cardPreviewStream) {
+      setCardPreviewUrl(null);
+      setCardPreviewStream(null);
+      return;
+    }
+    try {
+      setError(null);
+      setCardPreviewLoading(track.url);
+      const info = await analyzeMediaUrl(track.url);
+      if (info.platform === 'tiktok' && !info.rawMuxedUrl && !info.rawVideoUrl) {
+        setError('No playable video stream available for preview.');
+        return;
+      }
+      const stream = resolvePreviewStream(info);
+      if (!stream) {
+        setError('No playable video stream available for preview.');
+        return;
+      }
+      setCardPreviewUrl(track.url);
+      setCardPreviewStream(stream);
+    } catch (err: any) {
+      setError(`Preview failed: ${err.message || err}`);
+    } finally {
+      setCardPreviewLoading(null);
+    }
+  };
 
+  const downloadTrack = async (
+    track: { title: string; url: string },
+    type: BulkDownloadType
+  ) => {
+    const job = await startMediaDownload({
+      sourceUrl: track.url,
+      title: track.title,
+      type,
+      format: type === 'audio' ? 'mp3' : 'mp4',
+      customBitrate: type === 'audio' ? 320 : undefined,
+    });
+    if (onJobStarted) onJobStarted(job.jobId, job.filename);
+  };
 
   const handlePaste = async () => {
     try {
@@ -135,13 +192,23 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
     setDownloadingId(format.id);
 
     try {
+      const useAdaptiveMux =
+        format.type === 'video' &&
+        !analysis.rawMuxedUrl &&
+        analysis.rawVideoUrl &&
+        analysis.rawAudioUrl;
+
       const job = await startMediaDownload({
         sourceUrl: analysis.sourceUrl || format.directDownloadUrl || '',
-        directUrl: format.directDownloadUrl || analysis.rawSourceUrl,
+        directUrl: useAdaptiveMux
+          ? undefined
+          : format.directDownloadUrl || analysis.rawSourceUrl,
         title: analysis.title,
         type: format.type,
         format: format.format,
         customBitrate: format.bitrateKbps,
+        videoUrl: useAdaptiveMux ? analysis.rawVideoUrl : undefined,
+        audioUrl: useAdaptiveMux ? analysis.rawAudioUrl : undefined,
       });
 
       if (onJobStarted) {
@@ -152,6 +219,31 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
     } finally {
       setDownloadingId(null);
     }
+  };
+
+  const resolvePreviewStream = (info: any): string | undefined => {
+    // Prefer a true muxed (A+V) stream; if the platform only exposes separate
+    // adaptive streams, fall back to the server's live-mux merge endpoint.
+    if (info.rawMuxedUrl) return info.rawMuxedUrl;
+    // TikTok CDN requires a TikTok Referer header; route through the proxy.
+    if (info.platform === 'tiktok' && info.rawSourceUrl) {
+      return `/api/media/stream?url=${encodeURIComponent(info.rawSourceUrl)}`;
+    }
+    if (info.rawVideoUrl && info.rawAudioUrl) {
+      return `/api/media/merge-preview?v=${encodeURIComponent(info.rawVideoUrl)}&a=${encodeURIComponent(info.rawAudioUrl)}`;
+    }
+    return (
+      info.rawSourceUrl ||
+      info.availableFormats?.find((f: any) => f.type === 'video' && f.directDownloadUrl)?.directDownloadUrl ||
+      info.availableFormats?.find((f: any) => f.directDownloadUrl)?.directDownloadUrl
+    );
+  };
+
+  const formatDuration = (sec?: number) => {
+    if (!sec || sec <= 0) return '';
+    const m = Math.floor(sec / 60);
+    const s = sec % 60;
+    return `${m}:${String(s).padStart(2, '0')}`;
   };
 
   return (
@@ -167,7 +259,11 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
           <div>
             <h3 className="text-base font-bold text-white tracking-tight">Paste Media URL</h3>
             <p className="text-xs text-neutral-400">
-              Inspect authorized public media, verify download permissions, or transcode directly
+              {platformFilter === 'youtube'
+                ? 'Video link or full channel URL (e.g. youtube.com/@handle)'
+                : platformFilter === 'tiktok'
+                  ? 'Video link or profile URL (e.g. tiktok.com/@username)'
+                  : 'Inspect authorized public media, verify download permissions, or transcode directly'}
             </p>
           </div>
         </div>
@@ -179,9 +275,13 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
               value={url}
               onChange={(e) => setUrl(e.target.value)}
               placeholder={
-                platformFilter !== 'all'
-                  ? `Paste authorized ${platformFilter} URL (https://...)`
-                  : 'https://... (YouTube, SoundCloud, Pinterest, TikTok, or Direct HTTPS Media)'
+                platformFilter === 'youtube'
+                  ? 'https://youtube.com/@channel or https://youtube.com/watch?v=...'
+                  : platformFilter === 'tiktok'
+                    ? 'https://tiktok.com/@user or https://tiktok.com/@user/video/...'
+                    : platformFilter !== 'all'
+                      ? `Paste authorized ${platformFilter} URL (https://...)`
+                      : 'https://... (YouTube, SoundCloud, Pinterest, TikTok, or Direct HTTPS Media)'
               }
               className="w-full pl-4 pr-24 py-3 bg-neutral-900/90 border border-white/10 rounded-xl text-sm text-neutral-100 placeholder-neutral-500 focus:outline-none focus:border-white/50 focus:ring-1 focus:ring-white/30 transition-all font-mono"
             />
@@ -279,30 +379,64 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
               )}
 
               {/* Legal & Platform Notice Banner */}
-              {!analysis.downloadAuthorized && analysis.authorizedNotice && (
+              {analysis.authorizedNotice && (
                 <div className="mt-3 p-3.5 rounded-xl bg-white/10 border border-white/20 text-neutral-200/90 text-xs leading-relaxed space-y-1">
                   <p className="font-semibold text-neutral-200 flex items-center gap-1.5">
                     <AlertTriangle className="w-4 h-4 text-white" />
-                    Platform Rule & Copyright Safeguard:
+                    {analysis.downloadAuthorized ? 'Channel / Profile Notice:' : 'Platform Rule & Copyright Safeguard:'}
                   </p>
                   <p>{analysis.authorizedNotice}</p>
-                  <p className="text-[11px] text-white/70 pt-1">
-                    This tool strictly respects digital rights and terms of service. DRM circumvention and private stream extraction are prohibited.
-                  </p>
+                  {!analysis.downloadAuthorized && (
+                    <p className="text-[11px] text-white/70 pt-1">
+                      This tool strictly respects digital rights and terms of service. DRM circumvention and private stream extraction are prohibited.
+                    </p>
+                  )}
                 </div>
               )}
             </div>
           </div>
 
-          {/* Profile Track List */}
+          {/* Track / Video List (channel, playlist, profile) */}
           {analysis.tracks && analysis.tracks.length > 0 && (
-            <div className="space-y-2 pt-2">
-              <div className="flex items-center justify-between gap-2">
+            <div className="space-y-3 pt-2">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <h5 className="text-xs font-bold uppercase tracking-wider text-neutral-400 flex items-center gap-2">
-                  <Music className="w-3.5 h-3.5 text-white" />
-                  Tracks ({analysis.tracks.length})
+                  {isVideoPlatformList ? (
+                    <Film className="w-3.5 h-3.5 text-white" />
+                  ) : (
+                    <Music className="w-3.5 h-3.5 text-white" />
+                  )}
+                  {isVideoPlatformList ? 'Videos' : 'Tracks'} ({analysis.tracks.length})
                 </h5>
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  {isVideoPlatformList && (
+                    <div className="flex items-center rounded-lg border border-white/15 overflow-hidden text-[11px] font-semibold">
+                      <button
+                        type="button"
+                        onClick={() => setBulkDownloadType('video')}
+                        className={`px-3 py-1.5 flex items-center gap-1.5 transition-colors ${
+                          bulkDownloadType === 'video'
+                            ? 'bg-sky-500/30 text-sky-200'
+                            : 'bg-neutral-900/60 text-neutral-400 hover:text-white'
+                        }`}
+                      >
+                        <Film className="w-3 h-3" />
+                        Video
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setBulkDownloadType('audio')}
+                        className={`px-3 py-1.5 flex items-center gap-1.5 transition-colors ${
+                          bulkDownloadType === 'audio'
+                            ? 'bg-fuchsia-500/30 text-fuchsia-200'
+                            : 'bg-neutral-900/60 text-neutral-400 hover:text-white'
+                        }`}
+                      >
+                        <Music className="w-3 h-3" />
+                        Music
+                      </button>
+                    </div>
+                  )}
                   <button
                     onClick={() =>
                       setSelectedTracks((prev) =>
@@ -320,15 +454,9 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
                     onClick={async () => {
                       setDownloadingId('bulk');
                       try {
+                        const type: BulkDownloadType = isVideoPlatformList ? bulkDownloadType : 'audio';
                         for (const t of analysis.tracks!.filter((tr) => selectedTracks.has(tr.url))) {
-                          const job = await startMediaDownload({
-                            sourceUrl: t.url,
-                            title: t.title,
-                            type: 'audio',
-                            format: 'mp3',
-                            customBitrate: 320,
-                          });
-                          if (onJobStarted) onJobStarted(job.jobId, job.filename);
+                          await downloadTrack(t, type);
                         }
                       } catch (err: any) {
                         setError(`Download failed: ${err.message}`);
@@ -338,85 +466,310 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
                     }}
                     className="px-3 py-1.5 rounded-lg bg-fuchsia-500/20 hover:bg-fuchsia-500/30 border border-fuchsia-500/40 text-fuchsia-300 text-xs font-semibold transition-all disabled:opacity-50 flex items-center gap-1.5"
                   >
-                    <Download className="w-3 h-3" />
+                    {downloadingId === 'bulk' ? (
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                    ) : (
+                      <Download className="w-3 h-3" />
+                    )}
                     Download Selected ({selectedTracks.size})
+                    {isVideoPlatformList ? ` · ${bulkDownloadType === 'audio' ? 'Music' : 'Video'}` : ''}
                   </button>
                 </div>
               </div>
-              <div className="divide-y divide-white/5 rounded-xl border border-white/[0.06] overflow-hidden">
-                {analysis.tracks.map((t) => (
-                  <div key={t.url} className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3 bg-neutral-900/40">
-                    <input
-                      type="checkbox"
-                      checked={selectedTracks.has(t.url)}
-                      onChange={(e) => {
-                        setSelectedTracks((prev) => {
-                          const next = new Set(prev);
-                          if (e.target.checked) next.add(t.url);
-                          else next.delete(t.url);
-                          return next;
-                        });
-                      }}
-                      className="w-4 h-4 accent-fuchsia-400 cursor-pointer shrink-0"
-                      title="Select for download"
-                    />
-                    <button
-                      onClick={() => (currentId === t.url ? playerStore.toggle() : handleTogglePlay(t))}
-                      disabled={loadingPlayUrl === t.url}
-                      className="w-9 h-9 rounded-full bg-fuchsia-500/20 hover:bg-fuchsia-500/40 border border-fuchsia-500/40 text-fuchsia-300 flex items-center justify-center transition-all shrink-0"
-                      title={currentId === t.url && isPlaying ? 'Pause' : 'Play'}
-                    >
-                      {loadingPlayUrl === t.url ? (
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                      ) : currentId === t.url && isPlaying ? (
-                        <Pause className="w-4 h-4" />
-                      ) : (
-                        <Play className="w-4 h-4" />
-                      )}
-                    </button>
-                    <div className="flex items-center gap-3 min-w-0 flex-1">
-                      {t.thumbnail ? (
-                        <img src={t.thumbnail} alt="" className="w-9 h-9 rounded-lg object-cover border border-white/10" />
-                      ) : (
-                        <div className="w-9 h-9 rounded-lg bg-white/5 border border-white/10 flex items-center justify-center">
-                          <Music className="w-4 h-4 text-neutral-500" />
+
+              {isVideoPlatformList ? (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {analysis.tracks.map((t) => {
+                    const isPreviewOpen = cardPreviewUrl === t.url && !!cardPreviewStream;
+                    // TikTok CDN thumbnails require a TikTok Referer; proxy them.
+                    const thumbnailSrc =
+                      analysis.platform === 'tiktok' && t.thumbnail
+                        ? `/api/media/stream?url=${encodeURIComponent(t.thumbnail)}`
+                        : t.thumbnail;
+                    return (
+                      <div
+                        key={t.url}
+                        className={`rounded-xl border overflow-hidden bg-neutral-900/50 transition-all ${
+                          selectedTracks.has(t.url)
+                            ? 'border-sky-400/50 shadow-[0_0_0_1px_rgba(56,189,248,0.25)]'
+                            : 'border-white/[0.06]'
+                        }`}
+                      >
+                        <div className="relative aspect-[9/14] sm:aspect-video bg-black">
+                          {isPreviewOpen ? (
+                            <video
+                              key={cardPreviewStream}
+                              controls
+                              autoPlay
+                              playsInline
+                              src={cardPreviewStream!}
+                              className="absolute inset-0 w-full h-full object-contain bg-black"
+                            />
+                          ) : thumbnailSrc ? (
+                            <img
+                              src={thumbnailSrc}
+                              alt=""
+                              className="absolute inset-0 w-full h-full object-cover"
+                              onError={(e) => {
+                                (e.target as HTMLElement).style.display = 'none';
+                              }}
+                            />
+                          ) : (
+                            <div className="absolute inset-0 flex items-center justify-center text-neutral-600">
+                              <Film className="w-8 h-8" />
+                            </div>
+                          )}
+
+                          <div className="absolute top-2 left-2 flex items-center gap-2">
+                            <input
+                              type="checkbox"
+                              checked={selectedTracks.has(t.url)}
+                              onChange={(e) => {
+                                setSelectedTracks((prev) => {
+                                  const next = new Set(prev);
+                                  if (e.target.checked) next.add(t.url);
+                                  else next.delete(t.url);
+                                  return next;
+                                });
+                              }}
+                              className="w-4 h-4 accent-sky-400 cursor-pointer"
+                              title="Select for download"
+                            />
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={() => handleCardVideoPreview(t)}
+                            disabled={cardPreviewLoading === t.url}
+                            className="absolute bottom-2 right-2 px-2.5 py-1.5 rounded-lg bg-black/75 hover:bg-black/90 border border-white/20 text-white text-[11px] font-semibold flex items-center gap-1.5 disabled:opacity-50"
+                          >
+                            {cardPreviewLoading === t.url ? (
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                            ) : isPreviewOpen ? (
+                              <X className="w-3 h-3" />
+                            ) : (
+                              <Play className="w-3 h-3" />
+                            )}
+                            {isPreviewOpen ? 'Close' : 'Preview'}
+                          </button>
+
+                          {t.duration ? (
+                            <span className="absolute bottom-2 left-2 px-1.5 py-0.5 rounded bg-black/80 text-[10px] font-mono text-white">
+                              {formatDuration(t.duration)}
+                            </span>
+                          ) : null}
                         </div>
-                      )}
-                      <div className="min-w-0">
-                        <p className="text-sm font-semibold text-white truncate">{t.title}</p>
-                        <p className="text-[11px] text-neutral-500 truncate">
-                          {t.creator || analysis.creator || ''}
-                          {t.duration ? ` • ${Math.floor(t.duration / 60)}:${String(t.duration % 60).padStart(2, '0')}` : ''}
-                        </p>
+
+                        <div className="p-3 space-y-2.5">
+                          <div className="min-w-0">
+                            <p className="text-sm font-semibold text-white line-clamp-2 leading-snug">{t.title}</p>
+                            <p className="text-[11px] text-neutral-500 truncate mt-0.5">
+                              {t.creator || analysis.creator || ''}
+                            </p>
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              disabled={downloadingId !== null}
+                              onClick={async () => {
+                                setDownloadingId(`${t.url}:video`);
+                                try {
+                                  await downloadTrack(t, 'video');
+                                } catch (err: any) {
+                                  setError(`Download failed: ${err.message}`);
+                                } finally {
+                                  setDownloadingId(null);
+                                }
+                              }}
+                              className="flex-1 px-2.5 py-1.5 rounded-lg bg-sky-500/20 hover:bg-sky-500/30 border border-sky-500/40 text-sky-200 text-[11px] font-semibold flex items-center justify-center gap-1 disabled:opacity-50"
+                            >
+                              {downloadingId === `${t.url}:video` ? (
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                              ) : (
+                                <Film className="w-3 h-3" />
+                              )}
+                              Video
+                            </button>
+                            <button
+                              type="button"
+                              disabled={downloadingId !== null}
+                              onClick={async () => {
+                                setDownloadingId(`${t.url}:audio`);
+                                try {
+                                  await downloadTrack(t, 'audio');
+                                } catch (err: any) {
+                                  setError(`Download failed: ${err.message}`);
+                                } finally {
+                                  setDownloadingId(null);
+                                }
+                              }}
+                              className="flex-1 px-2.5 py-1.5 rounded-lg bg-fuchsia-500/20 hover:bg-fuchsia-500/30 border border-fuchsia-500/40 text-fuchsia-200 text-[11px] font-semibold flex items-center justify-center gap-1 disabled:opacity-50"
+                            >
+                              {downloadingId === `${t.url}:audio` ? (
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                              ) : (
+                                <Music className="w-3 h-3" />
+                              )}
+                              Music
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="divide-y divide-white/5 rounded-xl border border-white/[0.06] overflow-hidden">
+                  {analysis.tracks.map((t) => (
+                    <div key={t.url} className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3 bg-neutral-900/40">
+                      <input
+                        type="checkbox"
+                        checked={selectedTracks.has(t.url)}
+                        onChange={(e) => {
+                          setSelectedTracks((prev) => {
+                            const next = new Set(prev);
+                            if (e.target.checked) next.add(t.url);
+                            else next.delete(t.url);
+                            return next;
+                          });
+                        }}
+                        className="w-4 h-4 accent-fuchsia-400 cursor-pointer shrink-0"
+                        title="Select for download"
+                      />
+                      <button
+                        onClick={() => (currentId === t.url ? playerStore.toggle() : handleTogglePlay(t))}
+                        disabled={loadingPlayUrl === t.url}
+                        className="w-9 h-9 rounded-full bg-fuchsia-500/20 hover:bg-fuchsia-500/40 border border-fuchsia-500/40 text-fuchsia-300 flex items-center justify-center transition-all shrink-0"
+                        title={currentId === t.url && isPlaying ? 'Pause' : 'Play'}
+                      >
+                        {loadingPlayUrl === t.url ? (
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : currentId === t.url && isPlaying ? (
+                          <Pause className="w-4 h-4" />
+                        ) : (
+                          <Play className="w-4 h-4" />
+                        )}
+                      </button>
+                      <div className="flex items-center gap-3 min-w-0 flex-1">
+                        {t.thumbnail ? (
+                          <img src={t.thumbnail} alt="" className="w-9 h-9 rounded-lg object-cover border border-white/10" />
+                        ) : (
+                          <div className="w-9 h-9 rounded-lg bg-white/5 border border-white/10 flex items-center justify-center">
+                            <Music className="w-4 h-4 text-neutral-500" />
+                          </div>
+                        )}
+                        <div className="min-w-0">
+                          <p className="text-sm font-semibold text-white truncate">{t.title}</p>
+                          <p className="text-[11px] text-neutral-500 truncate">
+                            {t.creator || analysis.creator || ''}
+                            {t.duration ? ` • ${formatDuration(t.duration)}` : ''}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <span className="px-2 py-1 rounded-lg bg-fuchsia-500/10 border border-fuchsia-500/30 text-[11px] font-mono text-fuchsia-300 whitespace-nowrap">
+                          {trackBitrates[t.url] ? `${trackBitrates[t.url]} > 320` : '… > 320'}
+                        </span>
+                        <button
+                          onClick={async () => {
+                            setDownloadingId(t.url);
+                            try {
+                              await downloadTrack(t, 'audio');
+                            } catch (err: any) {
+                              setError(`Download failed: ${err.message}`);
+                            } finally {
+                              setDownloadingId(null);
+                            }
+                          }}
+                          disabled={downloadingId !== null}
+                          className="px-3 py-1.5 rounded-lg bg-white/20 hover:bg-white/30 border border-white/30 text-white text-xs font-semibold flex items-center gap-1.5 transition-all shrink-0"
+                        >
+                          <Download className="w-3 h-3" />
+                          {downloadingId === t.url ? 'Starting...' : 'Download'}
+                        </button>
                       </div>
                     </div>
-                    <div className="flex items-center gap-2 shrink-0">
-                      <span className="px-2 py-1 rounded-lg bg-fuchsia-500/10 border border-fuchsia-500/30 text-[11px] font-mono text-fuchsia-300 whitespace-nowrap">
-                        {trackBitrates[t.url] ? `${trackBitrates[t.url]} > 320` : '… > 320'}
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Formats Grid */}
+          {analysis.availableFormats.length > 0 && (
+            <div className="space-y-3 pt-2">
+              <h5 className="text-xs font-bold uppercase tracking-wider text-neutral-400 flex items-center gap-2">
+                <Layers className="w-3.5 h-3.5 text-white" />
+                Available Formats & Export Actions
+              </h5>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {analysis.availableFormats.map((fmt) => (
+                  <div
+                    key={fmt.id}
+                    onClick={() => setSelectedFormat(fmt.id)}
+                    className={`p-4 rounded-xl border transition-all cursor-pointer flex flex-col justify-between ${
+                      selectedFormat === fmt.id
+                        ? 'bg-white/10 border-white/40 shadow-glow-white/5'
+                        : 'bg-neutral-900/50 border-white/[0.06] hover:border-white/20'
+                    }`}
+                  >
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          {fmt.type === 'audio' ? (
+                            <Music className="w-4 h-4 text-fuchsia-400" />
+                          ) : fmt.type === 'image' ? (
+                            <Layers className="w-4 h-4 text-emerald-400" />
+                          ) : (
+                            <Film className="w-4 h-4 text-sky-400" />
+                          )}
+                          <span
+                            className={`text-xs font-bold uppercase ${
+                              fmt.type === 'audio'
+                                ? 'text-fuchsia-300'
+                                : fmt.type === 'image'
+                                  ? 'text-emerald-300'
+                                  : 'text-sky-300'
+                            }`}
+                          >
+                            {fmt.format}
+                          </span>
+                        </div>
+                        <span className="text-[11px] font-mono text-white bg-white/5 px-2 py-0.5 rounded">
+                          {fmt.qualityLabel}
+                        </span>
+                      </div>
+
+                      {fmt.resolution && (
+                        <p className="text-[11px] text-neutral-400">Resolution: {fmt.resolution}</p>
+                      )}
+
+                      {fmt.notes && (
+                        <p className="text-[11px] text-neutral-400 leading-relaxed italic bg-white/[0.02] p-2 rounded">
+                          {fmt.notes}
+                        </p>
+                      )}
+                    </div>
+
+                    <div className="pt-3 mt-2 border-t border-white/5 flex items-center justify-between">
+                      <span className="text-[10px] text-neutral-500 font-mono">
+                        {fmt.type.toUpperCase()}
                       </span>
+
                       <button
-                        onClick={async () => {
-                          setDownloadingId(t.url);
-                          try {
-                            const job = await startMediaDownload({
-                              sourceUrl: t.url,
-                              title: t.title,
-                              type: 'audio',
-                              format: 'mp3',
-                              customBitrate: 320,
-                            });
-                            if (onJobStarted) onJobStarted(job.jobId, job.filename);
-                          } catch (err: any) {
-                            setError(`Download failed: ${err.message}`);
-                          } finally {
-                            setDownloadingId(null);
-                          }
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          e.preventDefault();
+                          handleDownload(fmt);
                         }}
                         disabled={downloadingId !== null}
-                        className="px-3 py-1.5 rounded-lg bg-white/20 hover:bg-white/30 border border-white/30 text-white text-xs font-semibold flex items-center gap-1.5 transition-all shrink-0"
+                        className="px-3 py-1.5 rounded-lg bg-white/20 hover:bg-white/30 border border-white/30 text-white text-xs font-semibold flex items-center gap-1.5 transition-all"
                       >
                         <Download className="w-3 h-3" />
-                        {downloadingId === t.url ? 'Starting...' : 'Download'}
+                        {downloadingId === fmt.id ? 'Starting...' : 'Download'}
                       </button>
                     </div>
                   </div>
@@ -425,88 +778,8 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
             </div>
           )}
 
-          {/* Formats Grid */}
-          <div className="space-y-3 pt-2">
-            <h5 className="text-xs font-bold uppercase tracking-wider text-neutral-400 flex items-center gap-2">
-              <Layers className="w-3.5 h-3.5 text-white" />
-              Available Formats & Export Actions
-            </h5>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              {analysis.availableFormats.map((fmt) => (
-                <div
-                  key={fmt.id}
-                  onClick={() => setSelectedFormat(fmt.id)}
-                  className={`p-4 rounded-xl border transition-all cursor-pointer flex flex-col justify-between ${
-                    selectedFormat === fmt.id
-                      ? 'bg-white/10 border-white/40 shadow-glow-white/5'
-                      : 'bg-neutral-900/50 border-white/[0.06] hover:border-white/20'
-                  }`}
-                >
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        {fmt.type === 'audio' ? (
-                          <Music className="w-4 h-4 text-fuchsia-400" />
-                        ) : fmt.type === 'image' ? (
-                          <Layers className="w-4 h-4 text-emerald-400" />
-                        ) : (
-                          <Film className="w-4 h-4 text-sky-400" />
-                        )}
-                        <span
-                          className={`text-xs font-bold uppercase ${
-                            fmt.type === 'audio'
-                              ? 'text-fuchsia-300'
-                              : fmt.type === 'image'
-                                ? 'text-emerald-300'
-                                : 'text-sky-300'
-                          }`}
-                        >
-                          {fmt.format}
-                        </span>
-                      </div>
-                      <span className="text-[11px] font-mono text-white bg-white/5 px-2 py-0.5 rounded">
-                        {fmt.qualityLabel}
-                      </span>
-                    </div>
-
-                    {fmt.resolution && (
-                      <p className="text-[11px] text-neutral-400">Resolution: {fmt.resolution}</p>
-                    )}
-
-                    {fmt.notes && (
-                      <p className="text-[11px] text-neutral-400 leading-relaxed italic bg-white/[0.02] p-2 rounded">
-                        {fmt.notes}
-                      </p>
-                    )}
-                  </div>
-
-                  <div className="pt-3 mt-2 border-t border-white/5 flex items-center justify-between">
-                    <span className="text-[10px] text-neutral-500 font-mono">
-                      {fmt.type.toUpperCase()}
-                    </span>
-
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        e.preventDefault();
-                        handleDownload(fmt);
-                      }}
-                      disabled={downloadingId !== null}
-                      className="px-3 py-1.5 rounded-lg bg-white/20 hover:bg-white/30 border border-white/30 text-white text-xs font-semibold flex items-center gap-1.5 transition-all"
-                    >
-                      <Download className="w-3 h-3" />
-                      {downloadingId === fmt.id ? 'Starting...' : 'Download'}
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Video Preview */}
-          {analysis && analysis.mediaType === 'video' && (
+          {/* Video Preview (single video pages) */}
+          {analysis && analysis.mediaType === 'video' && !analysis.tracks?.length && (
             <div className="p-4 rounded-xl bg-white/[0.02] border border-white/5 space-y-3">
               <div className="flex items-center justify-between">
                 <span className="text-xs text-neutral-400">Video Preview:</span>
@@ -518,8 +791,7 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
                       setError(null);
                       setPreviewLoading(true);
                       const info = await analyzeMediaUrl(analysis.sourceUrl);
-                      const stream =
-                        info.rawSourceUrl || info.availableFormats.find((f) => f.directDownloadUrl)?.directDownloadUrl;
+                      const stream = resolvePreviewStream(info);
                       if (!stream) {
                         setError('No directly playable stream available for this video.');
                         return;
@@ -548,71 +820,70 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
           )}
 
           {/* Quick Ecosystem Jump Actions */}
-          <div className="p-4 rounded-xl bg-white/[0.02] border border-white/5 flex flex-wrap gap-2.5 items-center justify-between">
-            <span className="text-xs text-neutral-400">One-Click Ecosystem Actions:</span>
-            <div className="flex flex-wrap gap-2">
-              {analysis.mediaType === 'audio' ? (
-                <button
-                  onClick={() => {
-                    const audioFmt =
-                      analysis.availableFormats.find((f) => f.type === 'audio' && f.format?.toLowerCase() === 'mp3') ||
-                      analysis.availableFormats.find((f) => f.type === 'audio') ||
-                      analysis.availableFormats[0];
-                    if (audioFmt) handleDownload(audioFmt);
-                  }}
-                  disabled={downloadingId !== null}
-                  className="px-3.5 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-medium text-neutral-200 transition-all flex items-center gap-1.5"
-                >
-                  <Download className="w-3.5 h-3.5 text-white" />
-                  {downloadingId === (analysis.availableFormats.find((f) => f.type === 'audio' && f.format?.toLowerCase() === 'mp3')?.id || analysis.availableFormats.find((f) => f.type === 'audio')?.id || analysis.availableFormats[0]?.id)
-                    ? 'Starting...'
-                    : 'Download Track / Music'}
-                </button>
-              ) : (
-                onSendToOptimizer && (
+          {analysis.availableFormats.length > 0 && (
+            <div className="p-4 rounded-xl bg-white/[0.02] border border-white/5 flex flex-wrap gap-2.5 items-center justify-between">
+              <span className="text-xs text-neutral-400">One-Click Ecosystem Actions:</span>
+              <div className="flex flex-wrap gap-2">
+                {analysis.mediaType === 'audio' ? (
                   <button
-                    onClick={() => onSendToOptimizer(analysis.sourceUrl, analysis.title)}
+                    onClick={() => {
+                      const audioFmt =
+                        analysis.availableFormats.find((f) => f.type === 'audio' && f.format?.toLowerCase() === 'mp3') ||
+                        analysis.availableFormats.find((f) => f.type === 'audio') ||
+                        analysis.availableFormats[0];
+                      if (audioFmt) handleDownload(audioFmt);
+                    }}
+                    disabled={downloadingId !== null}
                     className="px-3.5 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-medium text-neutral-200 transition-all flex items-center gap-1.5"
                   >
-                    <Sparkles className="w-3.5 h-3.5 text-white" />
-                    Send to Video Optimizer
+                    <Download className="w-3.5 h-3.5 text-white" />
+                    {downloadingId === (analysis.availableFormats.find((f) => f.type === 'audio' && f.format?.toLowerCase() === 'mp3')?.id || analysis.availableFormats.find((f) => f.type === 'audio')?.id || analysis.availableFormats[0]?.id)
+                      ? 'Starting...'
+                      : 'Download Track / Music'}
                   </button>
-                )
-              )}
-              {onDirectDownload && selectedFormat && (() => {
-                const fmt = analysis.availableFormats.find(f => f.id === selectedFormat);
-                if (!fmt) return null;
-                const directUrl = fmt.directDownloadUrl || analysis.rawSourceUrl;
-                if (!directUrl) return null;
-                return (
+                ) : (
+                  onSendToOptimizer && (
+                    <button
+                      onClick={() => onSendToOptimizer(analysis.sourceUrl, analysis.title)}
+                      className="px-3.5 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-medium text-neutral-200 transition-all flex items-center gap-1.5"
+                    >
+                      <Sparkles className="w-3.5 h-3.5 text-white" />
+                      Send to Video Optimizer
+                    </button>
+                  )
+                )}
+                {onDirectDownload && selectedFormat && (() => {
+                  const fmt = analysis.availableFormats.find(f => f.id === selectedFormat);
+                  if (!fmt) return null;
+                  const directUrl = fmt.directDownloadUrl || analysis.rawSourceUrl;
+                  if (!directUrl) return null;
+                  return (
+                    <button
+                      onClick={() =>
+                        onDirectDownload({ ...fmt, directDownloadUrl: directUrl })
+                      }
+                      disabled={downloadingId !== null}
+                      className="px-3.5 py-1.5 rounded-xl bg-white/20 hover:bg-white/30 border border-white/30 text-white text-xs font-bold transition-all flex items-center gap-1.5"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      {downloadingId === selectedFormat ? 'Starting...' : 'Download'}
+                    </button>
+                  );
+                })()}
+                {onSendToAudio && !onDirectDownload && (
                   <button
-                    onClick={() =>
-                      onDirectDownload({ ...fmt, directDownloadUrl: directUrl })
-                    }
-                    disabled={downloadingId !== null}
-                    className="px-3.5 py-1.5 rounded-xl bg-white/20 hover:bg-white/30 border border-white/30 text-white text-xs font-bold transition-all flex items-center gap-1.5"
+                    onClick={() => onSendToAudio(analysis.sourceUrl, analysis.title, analysis.creator)}
+                    className="px-3.5 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-medium text-neutral-200 transition-all flex items-center gap-1.5"
                   >
-                    <Download className="w-3.5 h-3.5" />
-                    {downloadingId === selectedFormat ? 'Starting...' : 'Download'}
+                    <Music className="w-3.5 h-3.5 text-neutral-300" />
+                    {audioActionLabel}
                   </button>
-                );
-              })()}
-              {onSendToAudio && !onDirectDownload && (
-                <button
-                  onClick={() => onSendToAudio(analysis.sourceUrl, analysis.title, analysis.creator)}
-                  className="px-3.5 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-medium text-neutral-200 transition-all flex items-center gap-1.5"
-                >
-                  <Music className="w-3.5 h-3.5 text-neutral-300" />
-                  {audioActionLabel}
-                </button>
-              )}
+                )}
+              </div>
             </div>
-          </div>
+          )}
         </div>
       )}
     </div>
   );
 };
-
-
-

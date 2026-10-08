@@ -36,7 +36,7 @@ export const PlatformMediaView: React.FC<PlatformMediaViewProps> = ({
           title: 'YouTube Media',
           icon: YoutubeIcon,
           color: 'text-red-400 bg-red-500/10 border-red-500/30',
-          desc: 'Inspect authorized/publicly downloadable media links. 320 kbps MP3 export available with fidelity notices.',
+          desc: 'Paste a video or full channel link to list uploads, multi-select downloads, and export as video or music.',
           legalNotice:
             'YouTube streams are subject to platform terms. This tool does not bypass DRM or authentication. Only authorized media can be downloaded.',
           filter: 'youtube' as const,
@@ -66,7 +66,7 @@ export const PlatformMediaView: React.FC<PlatformMediaViewProps> = ({
           title: 'TikTok Media',
           icon: Flame,
           color: 'text-cyan-400 bg-cyan-500/10 border-cyan-500/30',
-          desc: 'Inspect public short-form content. Download authorized videos or hand off directly to the 60 FPS Video Optimizer.',
+          desc: 'Paste a video or profile link, multi-select clips, choose Video or Music per download, and preview each card.',
           legalNotice:
             'Downloading requires creator authorization. Watermark removal is strictly reserved for your own content.',
           filter: 'tiktok' as const,
