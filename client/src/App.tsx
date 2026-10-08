@@ -280,7 +280,6 @@ function App() {
             setIsSidebarOpen(false);
           }}
           isOpenMobile={isSidebarOpen}
-          onToggleMobile={() => setIsSidebarOpen((prev) => !prev)}
           activeJobsCount={activeJobsCount}
         />
 

@@ -26,7 +26,6 @@ interface SidebarNavigationProps {
   activeSection: AppNavSection;
   onSelectSection: (section: AppNavSection) => void;
   isOpenMobile: boolean;
-  onToggleMobile: () => void;
   activeJobsCount?: number;
 }
 
@@ -34,7 +33,6 @@ export const SidebarNavigation: React.FC<SidebarNavigationProps> = ({
   activeSection,
   onSelectSection,
   isOpenMobile,
-  onToggleMobile,
   activeJobsCount = 0,
 }) => {
   const sections = [
