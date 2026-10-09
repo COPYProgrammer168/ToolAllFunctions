@@ -52,6 +52,22 @@ const upload = multer({
     },
 });
 export const apiRouter = Router();
+/**
+ * Translate an error into an API response. Errors that carry an HTTP status
+ * (e.g. `RateLimitedError` → 503) keep it; everything else is a 400.
+ * `technicalDetails` (a stack trace) is only included outside production.
+ */
+function respondApiError(res, err, fallbackStatus = 400) {
+    const status = Number.isInteger(err?.status) ? err.status : fallbackStatus;
+    const body = {
+        error: err?.message || 'Request failed.',
+    };
+    if (err?.retryAfterSec)
+        body.retryAfterSec = err.retryAfterSec;
+    if (process.env.NODE_ENV !== 'production' && err?.stack)
+        body.technicalDetails = err.stack;
+    res.status(status).json(body);
+}
 // 1. Hardware status
 apiRouter.get('/system/hardware', async (_req, res) => {
     try {
@@ -262,11 +278,9 @@ apiRouter.post('/media/analyze', async (req, res) => {
         res.json(result);
     }
     catch (err) {
-        console.error('Media analyze error:', err);
-        res.status(400).json({
-            error: err.message || 'Failed to analyze media resource.',
-            technicalDetails: err.stack,
-        });
+        console.error('Media analyze error:', err?.message || err);
+        // 503 for a rate-limited platform, 400 for anything else (bad URL, DRM…).
+        respondApiError(res, err, 400);
     }
 });
 // B2. Streaming proxy for platform CDN URLs that require special headers
@@ -434,7 +448,9 @@ apiRouter.post('/media/download', async (req, res) => {
                 }
             }
             catch (err) {
-                return res.status(400).json({ error: err.message || 'Failed to resolve media URL.' });
+                console.error('Media resolve error:', err?.message || err);
+                // 503 when the platform is rate-limiting us, 400 otherwise.
+                return respondApiError(res, err, 400);
             }
         }
         if (!downloadTargetUrl) {

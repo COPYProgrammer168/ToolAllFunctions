@@ -5,6 +5,9 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { rememberStreamCredentials, getStreamCredentials } from '../StreamCredentials.js';
 import { findYtDlp, readCookieJarHeader } from '../../utils/ytDlp.js';
+import { findCookiesFile } from '../../utils/cookies.js';
+import { fetchWithRetry } from '../../utils/httpFetch.js';
+import { RateLimitedError } from '../../utils/errors.js';
 export { findYtDlp };
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 /** TikTok serves the desktop anti-bot challenge to desktop browsers; the
@@ -15,24 +18,6 @@ const MAX_PROFILE_VIDEOS = 100;
 /** Headers TikTok requires on every request we make to its origin. */
 const TIKTOK_ORIGIN = 'https://www.tiktok.com';
 const TIKTOK_REFERER = 'https://www.tiktok.com/';
-function findCookiesFile() {
-    const candidates = [
-        process.env.TT_COOKIES,
-        process.env.YT_COOKIES,
-        path.resolve(process.cwd(), 'cookies.txt'),
-        path.resolve(process.cwd(), 'server', 'cookies.txt'),
-        path.resolve(process.cwd(), '..', 'cookies.txt'),
-        path.join(os.homedir(), '.config', 'yt-dlp', 'cookies.txt'),
-    ].filter(Boolean);
-    for (const c of candidates) {
-        try {
-            if (c && fs.existsSync(c))
-                return c;
-        }
-        catch { }
-    }
-    return undefined;
-}
 /** Parse a Netscape cookies.txt into Playwright cookie objects. */
 function parseNetscapeCookies(text) {
     const out = [];
@@ -254,7 +239,7 @@ export class TikTokProvider {
             downloadAuthorized: limited.length > 0,
             authorizedNotice: limited.length > 0
                 ? `Found ${limited.length} video(s) on this profile. Select items to download as video or music, and preview each card.`
-                : 'Could not list profile videos. The account may be private, empty, or blocked by TikTok anti-bot checks. Add a cookies.txt with a logged-in TikTok session (set TT_COOKIES or place it as server/cookies.txt), or check the IP is not rate-limited.',
+                : 'Could not list profile videos. The account may be private, empty, or blocked by TikTok anti-bot checks. Add a cookies.txt from a logged-in session (set YT_COOKIES_FILE, default /etc/secrets/cookies.txt), or check the IP is not rate-limited.',
             copyrightNotice: 'TikTok content belongs to respective creators. Only download content you own or have explicit permission to use.',
             availableFormats: [],
             tracks: limited,
@@ -573,7 +558,10 @@ export class TikTokProvider {
                 }
             }
         }
-        catch {
+        catch (err) {
+            // A rate-limited IP must surface as a 503, not as "no stream available".
+            if (err instanceof RateLimitedError)
+                throw err;
             // Page fetch failed, continue with oEmbed data
         }
         // A URL found through the og:/regex fallbacks of the page we already
@@ -690,7 +678,9 @@ export class TikTokProvider {
     }
     async fetchVideoPageHtml(target, ua) {
         try {
-            const res = await fetch(target, {
+            // 429 is retried with back-off and then surfaces as a RateLimitedError,
+            // so a rate-limited IP no longer masquerades as "no stream available".
+            const res = await fetchWithRetry(target, {
                 headers: {
                     'User-Agent': ua,
                     Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -701,7 +691,7 @@ export class TikTokProvider {
                 },
                 redirect: 'follow',
                 signal: AbortSignal.timeout(12000),
-            });
+            }, 'TikTok page fetch');
             if (!res.ok)
                 return null;
             const html = await res.text();
@@ -714,7 +704,10 @@ export class TikTokProvider {
                 .join('; ');
             return { html, cookies };
         }
-        catch {
+        catch (err) {
+            // A rate-limited IP must not be silently downgraded to "no video found".
+            if (err instanceof RateLimitedError)
+                throw err;
             return null;
         }
     }

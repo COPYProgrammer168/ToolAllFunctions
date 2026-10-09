@@ -4,6 +4,9 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { rememberStreamCredentials } from '../StreamCredentials.js';
 import { YTDLP_UA, findYtDlp, readCookieJarHeader, tempCookieJar } from '../../utils/ytDlp.js';
+import { findCookiesFile } from '../../utils/cookies.js';
+import { fetchWithRetry } from '../../utils/httpFetch.js';
+import { RateLimitedError } from '../../utils/errors.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -70,17 +73,23 @@ export class YouTubeProvider implements IMediaProvider {
     const clientNotes: string[] = [];
 
     try {
-      const pageRes = await fetch(url, {
-        headers: {
-          'User-Agent': UA,
-          'Accept-Language': 'en-US,en;q=0.9',
-          // Skip the EU consent interstitial so the embedded player config
-          // (API key + visitor data) is present in the HTML.
-          Cookie: 'SOCS=CAI; CONSENT=PENDING+999',
+      // 429 is retried with back-off; if it persists the helper throws a
+      // RateLimitedError so the API answers 503 instead of blaming the video.
+      const pageRes = await fetchWithRetry(
+        url,
+        {
+          headers: {
+            'User-Agent': UA,
+            'Accept-Language': 'en-US,en;q=0.9',
+            // Skip the EU consent interstitial so the embedded player config
+            // (API key + visitor data) is present in the HTML.
+            Cookie: 'SOCS=CAI; CONSENT=PENDING+999',
+          },
+          redirect: 'follow',
+          signal: AbortSignal.timeout(10000),
         },
-        redirect: 'follow',
-        signal: AbortSignal.timeout(10000),
-      });
+        'YouTube watch page'
+      );
       if (!pageRes.ok) {
         failureReason = `watch page request failed with HTTP ${pageRes.status}`;
       } else {
@@ -101,23 +110,27 @@ export class YouTubeProvider implements IMediaProvider {
           ];
           for (const client of clients) {
             try {
-              const playerRes = await fetch(`https://www.youtube.com/youtubei/v1/player?key=${apiKey}`, {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  'User-Agent': UA,
-                  ...(visitorData ? { 'X-Goog-Visitor-Id': visitorData } : {}),
-                },
-                body: JSON.stringify({
-                  context: {
-                    client: { ...client, hl: 'en', gl: 'US', ...(visitorData ? { visitorData } : {}) },
+              const playerRes = await fetchWithRetry(
+                `https://www.youtube.com/youtubei/v1/player?key=${apiKey}`,
+                {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'User-Agent': UA,
+                    ...(visitorData ? { 'X-Goog-Visitor-Id': visitorData } : {}),
                   },
-                  videoId,
-                  contentCheckOk: true,
-                  racyCheckOk: true,
-                }),
-                signal: AbortSignal.timeout(10000),
-              });
+                  body: JSON.stringify({
+                    context: {
+                      client: { ...client, hl: 'en', gl: 'US', ...(visitorData ? { visitorData } : {}) },
+                    },
+                    videoId,
+                    contentCheckOk: true,
+                    racyCheckOk: true,
+                  }),
+                  signal: AbortSignal.timeout(10000),
+                },
+                `Innertube player (${client.clientName})`
+              );
               if (!playerRes.ok) {
                 clientNotes.push(`${client.clientName}: HTTP ${playerRes.status}`);
                 continue;
@@ -198,7 +211,9 @@ export class YouTubeProvider implements IMediaProvider {
         }
       }
     } catch (err) {
-      // Page / Innertube resolution failed
+      // Page / Innertube resolution failed. A rate-limited IP must reach the
+      // API layer as 503 rather than as "video cannot be downloaded".
+      if (err instanceof RateLimitedError) throw err;
       failureReason = `Innertube resolution failed: ${(err as Error).message}`;
     }
 
@@ -295,7 +310,7 @@ export class YouTubeProvider implements IMediaProvider {
         ? undefined
         : `This media cannot be downloaded through this tool because the platform did not expose an authorized download method for it right now${
             failureReason ? ` — ${failureReason}` : ' (blocked, age-restricted, or requires sign-in)'
-          }. If the video is your own or age-gated, add a cookies.txt from a logged-in session (set YT_COOKIES) and retry.`,
+          }. If the video is your own or age-gated, add a cookies.txt from a logged-in session (set YT_COOKIES_FILE, default /etc/secrets/cookies.txt) and retry.`,
       copyrightNotice:
         'This tool respects content rights. Use only for content you own or where an authorized download is provided.',
       availableFormats: formats,
@@ -327,7 +342,10 @@ export class YouTubeProvider implements IMediaProvider {
     if (!ytdlp) {
       return { error: 'yt-dlp is not installed on the server (set YT_DLP_PATH or install it)' };
     }
-    const jar = tempCookieJar();
+    // Use the configured session cookie file when one exists (copied to
+    // /tmp/yt-cookies.txt at startup), otherwise a throwaway jar.
+    const configuredCookies = findCookiesFile();
+    const jar = configuredCookies || tempCookieJar();
     try {
       const args = [
         '--no-warnings',
@@ -393,9 +411,12 @@ export class YouTubeProvider implements IMediaProvider {
     } catch (err) {
       return { error: `yt-dlp failed: ${(err as Error).message}` };
     } finally {
-      try {
-        fs.unlinkSync(jar);
-      } catch {}
+      // Never delete a session cookie file the operator mounted.
+      if (!configuredCookies) {
+        try {
+          fs.unlinkSync(jar);
+        } catch {}
+      }
     }
   }
 

@@ -6,6 +6,9 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { rememberStreamCredentials, getStreamCredentials } from '../StreamCredentials.js';
 import { findYtDlp, readCookieJarHeader } from '../../utils/ytDlp.js';
+import { findCookiesFile } from '../../utils/cookies.js';
+import { fetchWithRetry } from '../../utils/httpFetch.js';
+import { RateLimitedError } from '../../utils/errors.js';
 
 export { findYtDlp };
 
@@ -24,23 +27,6 @@ const MAX_PROFILE_VIDEOS = 100;
 /** Headers TikTok requires on every request we make to its origin. */
 const TIKTOK_ORIGIN = 'https://www.tiktok.com';
 const TIKTOK_REFERER = 'https://www.tiktok.com/';
-
-function findCookiesFile(): string | undefined {
-  const candidates = [
-    process.env.TT_COOKIES,
-    process.env.YT_COOKIES,
-    path.resolve(process.cwd(), 'cookies.txt'),
-    path.resolve(process.cwd(), 'server', 'cookies.txt'),
-    path.resolve(process.cwd(), '..', 'cookies.txt'),
-    path.join(os.homedir(), '.config', 'yt-dlp', 'cookies.txt'),
-  ].filter(Boolean) as string[];
-  for (const c of candidates) {
-    try {
-      if (c && fs.existsSync(c)) return c;
-    } catch {}
-  }
-  return undefined;
-}
 
 /** Parse a Netscape cookies.txt into Playwright cookie objects. */
 function parseNetscapeCookies(text: string): any[] {
@@ -264,7 +250,7 @@ export class TikTokProvider implements IMediaProvider {
       authorizedNotice:
         limited.length > 0
           ? `Found ${limited.length} video(s) on this profile. Select items to download as video or music, and preview each card.`
-          : 'Could not list profile videos. The account may be private, empty, or blocked by TikTok anti-bot checks. Add a cookies.txt with a logged-in TikTok session (set TT_COOKIES or place it as server/cookies.txt), or check the IP is not rate-limited.',
+          : 'Could not list profile videos. The account may be private, empty, or blocked by TikTok anti-bot checks. Add a cookies.txt from a logged-in session (set YT_COOKIES_FILE, default /etc/secrets/cookies.txt), or check the IP is not rate-limited.',
       copyrightNotice:
         'TikTok content belongs to respective creators. Only download content you own or have explicit permission to use.',
       availableFormats: [],
@@ -562,7 +548,9 @@ export class TikTokProvider implements IMediaProvider {
           isAuthorized = true;
         }
       }
-    } catch {
+    } catch (err) {
+      // A rate-limited IP must surface as a 503, not as "no stream available".
+      if (err instanceof RateLimitedError) throw err;
       // Page fetch failed, continue with oEmbed data
     }
 
@@ -694,18 +682,24 @@ export class TikTokProvider implements IMediaProvider {
     ua: string
   ): Promise<{ html: string; cookies: string } | null> {
     try {
-      const res = await fetch(target, {
-        headers: {
-          'User-Agent': ua,
-          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          'Accept-Language': 'en-US,en;q=0.9',
-          'sec-fetch-mode': 'navigate',
-          'sec-fetch-dest': 'document',
-          Referer: TIKTOK_REFERER,
+      // 429 is retried with back-off and then surfaces as a RateLimitedError,
+      // so a rate-limited IP no longer masquerades as "no stream available".
+      const res = await fetchWithRetry(
+        target,
+        {
+          headers: {
+            'User-Agent': ua,
+            Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'sec-fetch-mode': 'navigate',
+            'sec-fetch-dest': 'document',
+            Referer: TIKTOK_REFERER,
+          },
+          redirect: 'follow',
+          signal: AbortSignal.timeout(12000),
         },
-        redirect: 'follow',
-        signal: AbortSignal.timeout(12000),
-      });
+        'TikTok page fetch'
+      );
       if (!res.ok) return null;
       const html = await res.text();
       if (this.isWafChallenge(html)) return null;
@@ -715,7 +709,9 @@ export class TikTokProvider implements IMediaProvider {
         .filter(Boolean)
         .join('; ');
       return { html, cookies };
-    } catch {
+    } catch (err) {
+      // A rate-limited IP must not be silently downgraded to "no video found".
+      if (err instanceof RateLimitedError) throw err;
       return null;
     }
   }

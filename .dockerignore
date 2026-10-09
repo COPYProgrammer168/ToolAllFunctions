@@ -1,3 +1,9 @@
 **/node_modules
 **/dist
 .git
+# Session cookies must never end up in an image layer.
+cookies.txt
+*.cookies
+**/cookies.txt
+**/*.cookies
+.gitignore

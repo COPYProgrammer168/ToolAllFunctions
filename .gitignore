@@ -1,0 +1,6 @@
+# Platform session cookies (never commit these — they are credentials).
+# Mount them as a secret instead: YT_COOKIES_FILE (default /etc/secrets/cookies.txt).
+cookies.txt
+*.cookies
+**/cookies.txt
+**/*.cookies
