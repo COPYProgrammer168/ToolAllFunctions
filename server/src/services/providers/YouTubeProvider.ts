@@ -1,4 +1,11 @@
 import type { IMediaProvider, MediaAnalysisResult, MediaFormatOption, MediaTrackInfo } from './MediaProvider.js';
+import fs from 'node:fs';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { rememberStreamCredentials } from '../StreamCredentials.js';
+import { YTDLP_UA, findYtDlp, readCookieJarHeader, tempCookieJar } from '../../utils/ytDlp.js';
+
+const execFileAsync = promisify(execFile);
 
 const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
@@ -58,6 +65,9 @@ export class YouTubeProvider implements IMediaProvider {
     let videoFps: number | undefined;
     let videoDurationSec = 0;
     let playabilityReason: string | undefined;
+    let failureReason: string | undefined;
+    /** Per-client status collected for the diagnostic message. */
+    const clientNotes: string[] = [];
 
     try {
       const pageRes = await fetch(url, {
@@ -69,20 +79,25 @@ export class YouTubeProvider implements IMediaProvider {
           Cookie: 'SOCS=CAI; CONSENT=PENDING+999',
         },
         redirect: 'follow',
-        signal: AbortSignal.timeout(8000),
+        signal: AbortSignal.timeout(10000),
       });
-      if (pageRes.ok) {
+      if (!pageRes.ok) {
+        failureReason = `watch page request failed with HTTP ${pageRes.status}`;
+      } else {
         const html = await pageRes.text();
         const apiKey = html.match(/"INNERTUBE_API_KEY":"([^"]+)"/)?.[1];
         const visitorData =
           html.match(/"visitorData":"([^"]+)"/)?.[1] || html.match(/ytcfg\.set\(\{[^]*?"VISITOR_DATA":"([^"]+)"/)?.[1];
-        if (apiKey) {
+        if (!apiKey) {
+          failureReason = 'watch page did not contain INNERTUBE_API_KEY (consent wall or bot interstitial)';
+        } else {
           const clients = [
             { clientName: 'ANDROID', clientVersion: '20.10.38', androidSdkVersion: 30, osName: 'Android', osVersion: '12' },
             { clientName: 'ANDROID_VR', clientVersion: '1.57.27', androidSdkVersion: 32, osName: 'Android', osVersion: '12' },
             { clientName: 'IOS', clientVersion: '21.02.3', deviceMake: 'Apple', deviceModel: 'iPhone16,2', osName: 'iOS', osVersion: '17.5.1' },
             { clientName: 'WEB', clientVersion: '2.20250610.01.00' },
             { clientName: 'TVHTML5', clientVersion: '7.20250316.18.00' },
+            { clientName: 'WEB_EMBEDDED_PLAYER', clientVersion: '1.20250316.18.00' },
           ];
           for (const client of clients) {
             try {
@@ -101,17 +116,29 @@ export class YouTubeProvider implements IMediaProvider {
                   contentCheckOk: true,
                   racyCheckOk: true,
                 }),
-                signal: AbortSignal.timeout(8000),
+                signal: AbortSignal.timeout(10000),
               });
-              if (!playerRes.ok) continue;
-              const data = (await playerRes.json()) as any;
-              if (data?.playabilityStatus?.status && data.playabilityStatus.status !== 'OK') {
-                playabilityReason =
-                  data.playabilityStatus?.reason ||
-                  data.playabilityStatus?.messages?.[0] ||
-                  `playability status ${data.playabilityStatus.status}`;
+              if (!playerRes.ok) {
+                clientNotes.push(`${client.clientName}: HTTP ${playerRes.status}`);
                 continue;
               }
+              const data = (await playerRes.json()) as any;
+              if (data?.playabilityStatus?.status && data.playabilityStatus.status !== 'OK') {
+                const status = data.playabilityStatus.status;
+                const reason =
+                  data.playabilityStatus?.reason ||
+                  data.playabilityStatus?.messages?.[0] ||
+                  status;
+                playabilityReason = playabilityReason || reason;
+                clientNotes.push(`${client.clientName}: ${reason}`);
+                continue;
+              }
+              if (!data?.streamingData) {
+                clientNotes.push(`${client.clientName}: no streamingData`);
+                continue;
+              }
+              const idx = clientNotes.findIndex((n) => n.startsWith(client.clientName + ':'));
+              if (idx >= 0) clientNotes.splice(idx, 1);
 
               const lengthSeconds = Number(data?.videoDetails?.lengthSeconds);
               if (Number.isFinite(lengthSeconds) && lengthSeconds > 0) {
@@ -170,8 +197,35 @@ export class YouTubeProvider implements IMediaProvider {
           }
         }
       }
-    } catch {
+    } catch (err) {
       // Page / Innertube resolution failed
+      failureReason = `Innertube resolution failed: ${(err as Error).message}`;
+    }
+
+    if (!directVideoUrl && !adaptiveVideoUrl && !directAudioUrl) {
+      failureReason =
+        playabilityReason ||
+        failureReason ||
+        (clientNotes.length > 0 ? clientNotes.join('; ') : 'no Innertube client returned a usable stream');
+    }
+
+    // Last resort: yt-dlp, when it is installed (local dev, or on Render via the
+    // `pip3 install --user yt-dlp` step in render.yaml). It handles consent
+    // walls, embedded-player playback and age gates that the plain Innertube
+    // call refuses to answer.
+    if (!directVideoUrl && !adaptiveVideoUrl && !directAudioUrl) {
+      const viaYtDlp = await this.ytDlpExtractMedia(videoId, url);
+      if (viaYtDlp.videoUrl) directVideoUrl = viaYtDlp.videoUrl;
+      if (viaYtDlp.audioUrl) directAudioUrl = viaYtDlp.audioUrl;
+      if (viaYtDlp.durationSec && !videoDurationSec) videoDurationSec = viaYtDlp.durationSec;
+      if (viaYtDlp.title && title === 'YouTube Media') title = viaYtDlp.title;
+      if (viaYtDlp.author && author === 'Unknown Creator') author = viaYtDlp.author;
+      if (viaYtDlp.resolution && !videoResolution) videoResolution = viaYtDlp.resolution;
+      if (viaYtDlp.error) failureReason = failureReason || viaYtDlp.error;
+    }
+
+    if (!directVideoUrl && !adaptiveVideoUrl && !directAudioUrl) {
+      console.warn(`[youtube] ${videoId}: no stream resolved — ${failureReason}`);
     }
 
     const downloadAuthorized = !!(directVideoUrl || adaptiveVideoUrl || directAudioUrl);
@@ -239,9 +293,9 @@ export class YouTubeProvider implements IMediaProvider {
       downloadAuthorized,
       authorizedNotice: downloadAuthorized
         ? undefined
-        : `This media cannot be downloaded through this tool because the platform does not provide an authorized download method for it right now${
-            playabilityReason ? ` (${playabilityReason})` : ' (blocked, age-restricted, or requires sign-in)'
-          }.`,
+        : `This media cannot be downloaded through this tool because the platform did not expose an authorized download method for it right now${
+            failureReason ? ` — ${failureReason}` : ' (blocked, age-restricted, or requires sign-in)'
+          }. If the video is your own or age-gated, add a cookies.txt from a logged-in session (set YT_COOKIES) and retry.`,
       copyrightNotice:
         'This tool respects content rights. Use only for content you own or where an authorized download is provided.',
       availableFormats: formats,
@@ -250,6 +304,99 @@ export class YouTubeProvider implements IMediaProvider {
       rawVideoUrl: directVideoUrl || adaptiveVideoUrl,
       rawAudioUrl: directAudioUrl,
     };
+  }
+
+  /**
+   * Optional last-resort extraction with yt-dlp. Returns an empty result (with
+   * an `error` note) when yt-dlp is not installed or fails, so the caller can
+   * fall through to its own messaging.
+   */
+  private async ytDlpExtractMedia(
+    videoId: string,
+    watchUrl: string
+  ): Promise<{
+    videoUrl?: string;
+    audioUrl?: string;
+    durationSec?: number;
+    title?: string;
+    author?: string;
+    resolution?: string;
+    error?: string;
+  }> {
+    const ytdlp = findYtDlp();
+    if (!ytdlp) {
+      return { error: 'yt-dlp is not installed on the server (set YT_DLP_PATH or install it)' };
+    }
+    const jar = tempCookieJar();
+    try {
+      const args = [
+        '--no-warnings',
+        '--dump-single-json',
+        '--no-playlist',
+        '--cookies',
+        jar,
+        '--user-agent',
+        YTDLP_UA,
+        `https://www.youtube.com/watch?v=${videoId}`,
+      ];
+      const { stdout } = await execFileAsync(ytdlp, args, {
+        timeout: 90_000,
+        maxBuffer: 64 * 1024 * 1024,
+      });
+      const json = JSON.parse(stdout.toString()) as any;
+      // yt-dlp's format list also contains HLS/DASH manifests and playlist
+      // URLs — those are not media files and must never be handed to ffmpeg.
+      const isManifest = (f: any): boolean =>
+        /^m3u8|^https?\+dash|dash/i.test(`${f?.protocol || ''}`) ||
+        /manifest\.googlevideo|\.m3u8/i.test(`${f?.url || ''}`);
+      const videoFormats = (json?.formats || []).filter(
+        (f: any) => f?.url && !isManifest(f) && f.vcodec && f.vcodec !== 'none'
+      );
+      const audioFormats = (json?.formats || []).filter(
+        (f: any) => f?.url && !isManifest(f) && f.acodec && f.acodec !== 'none' && f.vcodec === 'none'
+      );
+      const pickUrl = (list: any[], audio: boolean): string | undefined => {
+        const score = (f: any): number => {
+          const mime = `${f?.mime_type || f?.mimetype || ''}`;
+          const codec = `${f?.vcodec || ''} ${f?.acodec || ''} ${mime}`;
+          // Prefer H.264/AAC in MP4: ffmpeg can then remux with -c copy,
+          // while VP9/AV1-only (webm) streams would have to be re-encoded.
+          const mp4 = audio ? /m4a|mp4a|audio\/mp4/i.test(mime + codec) : /avc1|h264|video\/mp4/i.test(mime + codec);
+          const quality = audio ? Number(f?.abr || f?.tbr || 0) : Number(f?.height || f?.tbr || 0);
+          return (mp4 ? 1e9 : 0) + quality;
+        };
+        const sorted = [...list].sort((a: any, b: any) => score(b) - score(a));
+        return sorted.find((f: any) => typeof f.url === 'string' && /^https?:/.test(f.url))?.url;
+      };
+      const videoUrl = pickUrl(videoFormats, false) || (json?.url ? json.url : undefined);
+      const audioUrl = pickUrl(audioFormats, true);
+      const best = videoFormats.map((f: any) => Number(f.height || 0)).sort((a: number, b: number) => b - a)[0] || 0;
+      const cookieHeader = readCookieJarHeader(jar);
+
+      for (const u of [videoUrl, audioUrl]) {
+        if (!u) continue;
+        rememberStreamCredentials(u, {
+          cookie: cookieHeader || undefined,
+          userAgent: YTDLP_UA,
+          referer: watchUrl,
+        });
+      }
+
+      return {
+        videoUrl,
+        audioUrl,
+        durationSec: Number(json?.duration) || undefined,
+        title: json?.title || undefined,
+        author: json?.uploader || json?.channel || undefined,
+        resolution: best > 0 ? `${best}p` : undefined,
+      };
+    } catch (err) {
+      return { error: `yt-dlp failed: ${(err as Error).message}` };
+    } finally {
+      try {
+        fs.unlinkSync(jar);
+      } catch {}
+    }
   }
 
   private isChannelUrl(url: string): boolean {

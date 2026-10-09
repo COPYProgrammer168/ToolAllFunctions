@@ -144,9 +144,27 @@ mountPath `/mnt/data`, then set `STORAGE_DIR=/mnt/data`.
 ```bash
 npm run build --prefix server     # tsc
 npm run build --prefix client     # tsc -b && vite build
-npx tsx scripts/check-providers.ts   # from server/ — resolves + range-fetches
+npx tsx scripts/check-providers.ts    # from server/ — resolves + range-fetches
                                      # a YouTube and a TikTok video
+npx tsx scripts/check-yt-fallback.ts   # yt-dlp YouTube fallback in isolation
+npx tsx scripts/check-yt-failure.ts    # inspect the "not authorized" notice
 ```
+
+### YouTube resolution order
+
+1. Watch page (consent cookie) → `INNERTUBE_API_KEY` + `visitorData`
+2. Innertube `/youtubei/v1/player` with `ANDROID`, `ANDROID_VR`, `IOS`, `WEB`,
+   `TVHTML5`, `WEB_EMBEDDED_PLAYER` — keeps going until it has video **and** audio
+3. `yt-dlp` when installed (`YT_DLP_PATH`, PATH, `~/.local/bin`, or the
+   `pip3 install --user yt-dlp` step in `render.yaml`); it runs with a temporary
+   cookie jar whose cookies are replayed with the returned URLs. HLS/DASH
+   manifest URLs are filtered out, and H.264/AAC MP4 is preferred so ffmpeg can
+   remux with `-c copy`.
+
+When nothing resolves, the notice now carries YouTube's actual playability
+reason (e.g. "This video is unavailable"), the server logs
+`[youtube] <videoId>: no stream resolved — <reason>`, and the UI suggests adding
+a `cookies.txt` from a logged-in session (`YT_COOKIES`) for age-gated content.
 
 Last run (through the running server on `:3999`):
 

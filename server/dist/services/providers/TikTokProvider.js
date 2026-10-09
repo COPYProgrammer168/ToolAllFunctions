@@ -4,6 +4,8 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { rememberStreamCredentials, getStreamCredentials } from '../StreamCredentials.js';
+import { findYtDlp, readCookieJarHeader } from '../../utils/ytDlp.js';
+export { findYtDlp };
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 /** TikTok serves the desktop anti-bot challenge to desktop browsers; the
  *  phone user agent still receives fully server-rendered video pages. */
@@ -30,63 +32,6 @@ function findCookiesFile() {
         catch { }
     }
     return undefined;
-}
-/** Flatten a Netscape cookie jar into a single `Cookie` request header. */
-function readCookieJarHeader(jarPath) {
-    try {
-        if (!fs.existsSync(jarPath))
-            return '';
-        return fs
-            .readFileSync(jarPath, 'utf8')
-            .split(/\r?\n/)
-            .filter((line) => line && !line.startsWith('#'))
-            .map((line) => {
-            const parts = line.split('\t');
-            return parts.length >= 7 && parts[5] ? `${parts[5]}=${parts[6]}` : '';
-        })
-            .filter(Boolean)
-            .join('; ');
-    }
-    catch {
-        return '';
-    }
-}
-/** Locate an optional yt-dlp binary. Returns `null` when it is not installed,
- *  which is the normal case on a stock Render native instance. */
-export function findYtDlp() {
-    const candidates = [
-        process.env.YT_DLP_PATH,
-        'yt-dlp',
-        'yt-dlp.exe',
-        path.join(os.homedir(), '.local', 'bin', 'yt-dlp'),
-        path.join(os.homedir(), 'AppData', 'Roaming', 'Python', 'Python314', 'Scripts', 'yt-dlp.exe'),
-        path.join(os.homedir(), 'AppData', 'Roaming', 'Python', 'Python313', 'Scripts', 'yt-dlp.exe'),
-        path.join(os.homedir(), 'AppData', 'Local', 'Programs', 'Python', 'Python313', 'Scripts', 'yt-dlp.exe'),
-        path.join(os.homedir(), '.pyenv', 'shims', 'yt-dlp'),
-    ].filter(Boolean);
-    for (const c of candidates) {
-        try {
-            if (c === 'yt-dlp' || c === 'yt-dlp.exe') {
-                // Bare command names must actually be resolvable on PATH.
-                const pathVar = process.env.PATH || '';
-                const found = pathVar
-                    .split(path.delimiter)
-                    .filter(Boolean)
-                    .some((dir) => fs.existsSync(path.join(dir, c)));
-                if (found)
-                    return c;
-                continue;
-            }
-            if (fs.existsSync(c))
-                return c;
-        }
-        catch { }
-    }
-    return null;
-}
-/** True when yt-dlp is usable on this host (optional dependency). */
-export function hasYtDlp() {
-    return findYtDlp() !== null;
 }
 /** Parse a Netscape cookies.txt into Playwright cookie objects. */
 function parseNetscapeCookies(text) {
