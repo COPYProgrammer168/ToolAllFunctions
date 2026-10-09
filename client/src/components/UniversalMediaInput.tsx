@@ -102,7 +102,9 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
       setError(null);
       setLoadingPlayUrl(track.url);
       const info = await analyzeMediaUrl(track.url);
-      const stream = info.rawSourceUrl || info.availableFormats.find((f) => f.directDownloadUrl)?.directDownloadUrl;
+      const stream =
+        toPlayableUrl(info.rawSourceUrl) ||
+        toPlayableUrl(info.availableFormats.find((f) => f.directDownloadUrl)?.directDownloadUrl);
       if (!stream) {
         setError('No playable stream available for this track.');
         return;
@@ -125,13 +127,12 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
       setError(null);
       setCardPreviewLoading(track.url);
       const info = await analyzeMediaUrl(track.url);
-      if (info.platform === 'tiktok' && !info.rawMuxedUrl && !info.rawVideoUrl) {
-        setError('No playable video stream available for preview.');
-        return;
-      }
       const stream = resolvePreviewStream(info);
       if (!stream) {
-        setError('No playable video stream available for preview.');
+        setError(
+          info.authorizedNotice ||
+            'No playable video stream available for preview — the platform did not expose a public video URL. Re-run the analysis, or try a different link.'
+        );
         return;
       }
       setCardPreviewUrl(track.url);
@@ -221,22 +222,33 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
     }
   };
 
+  // Platform CDN stream URLs are signed/issued for the *server's* IP, so a
+  // browser loading them directly gets HTTP 403 (or CORS failure). Everything
+  // remote therefore goes through the server's stream proxy, which forwards
+  // the required headers/cookies and supports HTTP Range.
+  const toPlayableUrl = (candidate?: string): string | undefined => {
+    if (!candidate) return undefined;
+    if (/^https?:\/\//i.test(candidate)) {
+      return `/api/media/stream?url=${encodeURIComponent(candidate)}`;
+    }
+    return candidate;
+  };
+
   const resolvePreviewStream = (info: any): string | undefined => {
     // Prefer a true muxed (A+V) stream; if the platform only exposes separate
     // adaptive streams, fall back to the server's live-mux merge endpoint.
-    if (info.rawMuxedUrl) return info.rawMuxedUrl;
-    // TikTok CDN requires a TikTok Referer header; route through the proxy.
-    if (info.platform === 'tiktok' && info.rawSourceUrl) {
-      return `/api/media/stream?url=${encodeURIComponent(info.rawSourceUrl)}`;
-    }
+    if (info.rawMuxedUrl) return toPlayableUrl(info.rawMuxedUrl);
     if (info.rawVideoUrl && info.rawAudioUrl) {
       return `/api/media/merge-preview?v=${encodeURIComponent(info.rawVideoUrl)}&a=${encodeURIComponent(info.rawAudioUrl)}`;
     }
-    return (
+    if (info.platform === 'tiktok' && info.rawSourceUrl) {
+      return toPlayableUrl(info.rawSourceUrl);
+    }
+    const direct =
       info.rawSourceUrl ||
       info.availableFormats?.find((f: any) => f.type === 'video' && f.directDownloadUrl)?.directDownloadUrl ||
-      info.availableFormats?.find((f: any) => f.directDownloadUrl)?.directDownloadUrl
-    );
+      info.availableFormats?.find((f: any) => f.directDownloadUrl)?.directDownloadUrl;
+    return toPlayableUrl(direct);
   };
 
   const formatDuration = (sec?: number) => {
@@ -504,6 +516,11 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
                               playsInline
                               src={cardPreviewStream!}
                               className="absolute inset-0 w-full h-full object-contain bg-black"
+                              onError={() => {
+                                setCardPreviewUrl(null);
+                                setCardPreviewStream(null);
+                                setError('Preview failed: the stream could not be played (expired or blocked by the platform). Try analyzing the link again.');
+                              }}
                             />
                           ) : thumbnailSrc ? (
                             <img
@@ -793,7 +810,10 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
                       const info = await analyzeMediaUrl(analysis.sourceUrl);
                       const stream = resolvePreviewStream(info);
                       if (!stream) {
-                        setError('No directly playable stream available for this video.');
+                        setError(
+                          info.authorizedNotice ||
+                            'No directly playable stream available for this video. Re-run the analysis or try another link.'
+                        );
                         return;
                       }
                       setPreviewVideoUrl(stream);
@@ -814,6 +834,12 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
                   controls
                   src={previewVideoUrl}
                   className="w-full rounded-xl border border-white/10 bg-black max-h-96"
+                  onError={() => {
+                    setPreviewVideoUrl(null);
+                    setError(
+                      'Preview failed: the resolved stream could not be played (signature expired or blocked by the platform). Re-run the analysis and try again.'
+                    );
+                  }}
                 />
               )}
             </div>

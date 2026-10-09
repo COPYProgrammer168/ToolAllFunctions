@@ -8,6 +8,7 @@ import { HardwareDetector } from './HardwareDetector.js';
 import { sanitizeFilename } from '../utils/security.js';
 import { STORAGE_ROOT } from '../utils/paths.js';
 import { loadJobs, saveJob, deleteJobRow } from './JobDatabase.js';
+import { buildStreamHeaders } from './StreamCredentials.js';
 
 const BASE_MEDIA_DIR = path.join(STORAGE_ROOT, 'media-tools');
 
@@ -259,19 +260,11 @@ export class MediaJobManager {
       }
     } catch {}
 
-    const reqHeaders: Record<string, string> = {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    };
+    const reqHeaders: Record<string, string> = buildStreamHeaders(remoteUrl);
 
-    // TikTok CDN rejects requests without a TikTok referer
-    if (/tiktok|tikcdn/i.test(remoteUrl)) {
-      reqHeaders['Referer'] = 'https://www.tiktok.com/';
-      reqHeaders['Origin'] = 'https://www.tiktok.com';
-    }
-
-    if (existingBytes > 0) {
-      reqHeaders['Range'] = `bytes=${existingBytes}-`;
-    }
+    // Always send a Range header (even for the first request): Google's
+    // audio endpoints answer a header-only 200 and then stall forever.
+    reqHeaders['Range'] = `bytes=${existingBytes}-`;
 
     const response = await fetch(remoteUrl, {
       headers: reqHeaders,

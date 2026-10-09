@@ -3,6 +3,9 @@ import cors from 'cors';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+// Side-effect: resolve ffmpeg/ffprobe (PATH or ffmpeg-static) before any
+// service spawns a shell command.
+import './utils/binaries.js';
 import { apiRouter } from './routes/api.js';
 import { JobManager } from './services/JobManager.js';
 import { MediaJobManager } from './services/MediaJobManager.js';

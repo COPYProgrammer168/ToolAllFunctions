@@ -1,89 +1,163 @@
-# Deploy on Render — File Root Directory & Persistence Note
+# Deploy on Render — Native Node (via `render.yaml`)
 
-## 1. Set Storage Root (SQLite + Uploads)
+Target: **Render Native Environment (Node)**, defined in `render.yaml` at the repo root.
+No Docker required.
 
-- **Default** (local): `./storage` folder next to built server
-- **Render**: set env var `STORAGE_DIR=/mnt/data` to use a Render Disk (persists across restarts/redeploys)
-- Without `STORAGE_DIR`: jobs and uploads are ephemeral (cleared on restart)
-- `JOBS_DB_PATH` auto-resolves to `STORAGE_ROOT/jobs.db`
+---
 
-## 2. Render Dashboard Setup
+## 1. What `render.yaml` does
 
-1. Create Web Service, connect repo
-2. **Build command:**
-   ```
-   npm install && npm install --prefix server && npm install --prefix client && npm run build --prefix client && npm run build --prefix server
-   ```
-3. **Start command:**
-   ```
-   npm run start --prefix server
-   ```
-4. **Environment Variables:**
-   - `PORT` ← auto-injected
-   - `STORAGE_DIR=/mnt/data` ← for persistence
-   - `JOBS_DB_PATH` ← optional
-5. **(Optional) Persistent Disk:**
-   - In Render dashboard: add Persistent Disk, size 10GB+, mountPath `/mnt/data`
-   - This keeps `jobs.db` and `uploads` persistent
+```yaml
+services:
+  - type: web
+    name: ai-video-optimizer
+    env: node
+    plan: free
+    buildCommand:
+      pip3 install --user yt-dlp            # optional extraction fallback (non-fatal)
+      npm install
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install --prefix server
+      npm install --prefix client
+      npm run build --prefix client
+      npm run build --prefix server
+    startCommand: 'export PATH="$HOME/.local/bin:$PATH"; npm run start --prefix server'
+```
 
-## 3. TikTok + ffmpeg
+- **Single service definition.** The file previously contained two duplicate
+  top-level `services:` keys (invalid YAML — Render ignored/failed the blueprint)
+  and a `PORT: fromService: ""` entry that referenced nothing.
+- `PORT` is set explicitly to `10000` (Render's default ingress port).
+- `NODE_VERSION=22`.
 
-- Dockerfile included installs ffmpeg + playwright chromium for TikTok headless fallback
-- On native Node: ensure ffmpeg in system PATH, or use Dockerfile
-- On Render native Node: set `STORAGE_DIR=/mnt/data` for SQLite persistence
+---
 
-## 4. File Structure After Deploy
+## 2. ffmpeg / ffprobe — no system install needed
+
+Render's native Node environment does **not** ship ffmpeg.
+
+`server/src/utils/binaries.ts` resolves the binaries in this order:
+
+1. `FFMPEG_PATH` / `FFPROBE_PATH` env overrides
+2. whatever is on `PATH` (local dev, Docker image)
+3. the `ffmpeg-static` / `ffprobe-static` npm packages (installed as regular
+   dependencies, so they are present in every environment)
+
+On import it prepends the resolved directory to `PATH`, so every existing
+`exec('ffmpeg ...')` / `exec('ffprobe ...')` call site keeps working unchanged.
+
+> On Alpine/Docker images, `apk add ffmpeg` is used in **both** stages — the
+> production stage used to miss it (builder packages are not carried over).
+
+---
+
+## 3. yt-dlp — optional fallback only
+
+`pip3 install --user yt-dlp || echo "yt-dlp install skipped"` runs at build time.
+Nothing depends on it: YouTube/TikTok extraction is pure HTTP first, Playwright
+second, yt-dlp last.
+
+---
+
+## 4. Playwright browsers
+
+Browsers are **not** downloaded on Render (`PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1`)
+because a native Node instance cannot install the system libraries Chromium
+needs. TikTok extraction therefore uses its HTTP chain:
+
+1. desktop UA page fetch
+2. mobile UA page fetch
+3. `https://m.tiktok.com/v/{id}.html` (the request that reliably returns
+   `__UNIVERSAL_DATA_FOR_REHYDRATION__` with `playAddr`)
+
+Playwright is attempted only when `playwrightAvailable()` returns true and
+fails silently otherwise. In the Dockerfile the browsers are installed in the
+builder **and copied** to the production stage (they live in
+`/root/.cache/ms-playwright`, not in `node_modules` — they were previously
+never copied).
+
+---
+
+## 5. Stream credentials & preview proxy
+
+- TikTok signs `playAddr` against the `tt_chain_token` cookie issued with the
+  page. `server/src/services/StreamCredentials.ts` caches those headers/cookies
+  (45 min TTL) during analysis so the download worker and preview proxy can
+  replay them.
+- YouTube `googlevideo.com` URLs are IP-bound to the server, so a browser
+  loading them directly receives **403**. The client routes every remote
+  stream through `GET /api/media/stream?url=...`, which forwards the correct
+  headers and supports HTTP Range. Separate adaptive tracks go through
+  `GET /api/media/merge-preview`.
+- Remote downloads use `server/src/utils/httpDownload.ts` (`fetch` + streams) —
+  the old `curl.exe` calls do not exist on Linux and were shell-injection risks.
+- **Every** remote request sends a `Range` header (`bytes=0-` at minimum):
+  Google's `googlevideo` *audio* endpoints answer a Range-less request with
+  `200` + `Content-Length` and then never send a body, which previously looked
+  like a permanent hang on every muxed (adaptive) download and preview.
+- yt-dlp (when present) runs with a temporary cookie jar; the jar is replayed
+  with the URLs it returns, because TikTok signs them against that session.
+
+---
+
+## 6. Persistence
+
+| Env var       | Purpose                                              |
+| ------------- | ---------------------------------------------------- |
+| `STORAGE_DIR` | storage root (uploads, `jobs.db`) — set to `/mnt/data` with a persistent disk |
+| `JOBS_DB_PATH`| override the SQLite path (defaults to `STORAGE_ROOT/jobs.db`) |
+| `PORT`        | set to `10000` in `render.yaml`                       |
+
+Both `STORAGE_DIR` and `JOBS_DB_PATH` are listed in `render.yaml` with
+`sync: false` — set them in the Render dashboard after attaching a disk.
+
+Persistent disk (optional): add in Render dashboard → size 10 GB →
+mountPath `/mnt/data`, then set `STORAGE_DIR=/mnt/data`.
+
+---
+
+## 7. File structure after deploy
 
 ```
 [app root]
-│
 ├─ server/
-│   ├─ dist/            ← built server
-│   ├─ storage/         ← jobs.db, uploads, media-tools
-│   │   └─ (persisted if STORAGE_DIR=/mnt/data)
-│   └─ server.js        ← entry point
-│
+│   ├─ dist/          ← built server (tsc)
+│   └─ storage/       ← jobs.db, uploads (or $STORAGE_DIR)
 └─ client/
-    └─ dist/            ← built client (HTML + JS/CSS)
+    └─ dist/          ← built client (Vite) — served by Express + SPA fallback
 ```
 
-## 5. Quick Checklist
+---
 
-- [ ] Push code to GitHub
-- [ ] Create Render Web Service, connect repo
-- [ ] Set build/start commands
-- [ ] Add `STORAGE_DIR=/mntdata` env var
-- [ ] (Optional) Add Persistent Disk 10GB+ at `/mnt/data`
-- [ ] Deploy
-- [ ] Visit `https://your-service.onrender.com/health` → `{"status":"ok"}`
+## 8. Deployment steps
 
-## 6. Key Files Modified
-
-1. `server/src/utils/paths.ts` — `STORAGE_ROOT` / `JOBS_DB_PATH` env-driven
-2. `server/src/services/JobDatabase.ts` — SQLite persistence (`better-sqlite3`)
-3. `server/src/services/MediaJobManager.ts` — save on progress/terminal; restore on restart; delete→SQLite
-3. `server/src/server.ts` — client serving + SPA fallback
-4. `server/Dockerfile` — ffmpeg + playwright for TikTok
-5. `render.yaml` — two service definitions + env vars
-
-## 7. Verified
-
-- Server TS: OK
-- Client TS: OK
-- `server.js` built (2.2KB)
-- `client/dist` has `index.html` + assets
-
-## 8. Deployment Steps
-
-1. Push code to GitHub
-2. Create Render Web Service, connect repo
-3. Set build/start commands from render.yaml
-4. Add `STORAGE_DIR=/mntdata` env var
-5. (Optional) Add Persistent Disk 10GB+ at `/mnt/data`
-6. Deploy
-7. Visit `/health` → `{"status":"ok"}`
-
-TikTok + ffmpeg: Dockerfile installs ffmpeg + playwright chromium. On native Node, ensure ffmpeg in PATH or use Dockerfile.
+1. Push to GitHub (repo root must contain `render.yaml`).
+2. Render → New → Web Service → connect repo (Render auto-detects `render.yaml`).
+3. (Optional) Add a persistent disk and set `STORAGE_DIR=/mnt/data`.
+4. Deploy.
+5. Open `https://your-service.onrender.com/health` → `{"status":"ok"}`.
+6. Paste a YouTube/TikTok link in the app → analyze → preview → download.
 
 ---
-All TypeScript checks pass. Push code, deploy, and you're live.
+
+## 9. Local verification
+
+```bash
+npm run build --prefix server     # tsc
+npm run build --prefix client     # tsc -b && vite build
+npx tsx scripts/check-providers.ts   # from server/ — resolves + range-fetches
+                                     # a YouTube and a TikTok video
+```
+
+Last run (through the running server on `:3999`):
+
+| Check | Result |
+| --- | --- |
+| `GET /health` | `200 {"status":"ok"}` |
+| TikTok analyze (`@tiktok/video/7694307066965396766`) | duration 52 s, muxed URL + cookies |
+| YouTube analyze (`dQw4w9WgXcQ`) | duration 213 s, muxed + audio URLs |
+| `GET /api/media/stream` (both platforms, `Range: bytes=0-4095`) | `206 video/mp4`, `ftypisom` / `ftypmp42` |
+| `GET /api/media/merge-preview` | 11.9 MB MP4 in 18 s, ffprobe duration 213.04 s |
+| `POST /api/media/download` — YouTube muxed video | `COMPLETED`, 11.8 MB |
+| `POST /api/media/download` — explicit video+audio mux | `COMPLETED` |
+| `POST /api/media/download` — TikTok video | `COMPLETED`, 9.9 MB |
+| `POST /api/media/download` — YouTube MP3 (320 kbps) | `COMPLETED` |

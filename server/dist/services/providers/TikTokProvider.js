@@ -1,16 +1,26 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { rememberStreamCredentials, getStreamCredentials } from '../StreamCredentials.js';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+/** TikTok serves the desktop anti-bot challenge to desktop browsers; the
+ *  phone user agent still receives fully server-rendered video pages. */
+const MOBILE_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
 const execFileAsync = promisify(execFile);
 const MAX_PROFILE_VIDEOS = 100;
+/** Headers TikTok requires on every request we make to its origin. */
+const TIKTOK_ORIGIN = 'https://www.tiktok.com';
+const TIKTOK_REFERER = 'https://www.tiktok.com/';
 function findCookiesFile() {
     const candidates = [
         process.env.TT_COOKIES,
+        process.env.YT_COOKIES,
         path.resolve(process.cwd(), 'cookies.txt'),
         path.resolve(process.cwd(), 'server', 'cookies.txt'),
         path.resolve(process.cwd(), '..', 'cookies.txt'),
+        path.join(os.homedir(), '.config', 'yt-dlp', 'cookies.txt'),
     ].filter(Boolean);
     for (const c of candidates) {
         try {
@@ -21,20 +31,62 @@ function findCookiesFile() {
     }
     return undefined;
 }
-function findYtDlp() {
+/** Flatten a Netscape cookie jar into a single `Cookie` request header. */
+function readCookieJarHeader(jarPath) {
+    try {
+        if (!fs.existsSync(jarPath))
+            return '';
+        return fs
+            .readFileSync(jarPath, 'utf8')
+            .split(/\r?\n/)
+            .filter((line) => line && !line.startsWith('#'))
+            .map((line) => {
+            const parts = line.split('\t');
+            return parts.length >= 7 && parts[5] ? `${parts[5]}=${parts[6]}` : '';
+        })
+            .filter(Boolean)
+            .join('; ');
+    }
+    catch {
+        return '';
+    }
+}
+/** Locate an optional yt-dlp binary. Returns `null` when it is not installed,
+ *  which is the normal case on a stock Render native instance. */
+export function findYtDlp() {
     const candidates = [
+        process.env.YT_DLP_PATH,
         'yt-dlp',
         'yt-dlp.exe',
-        'C:\\Users\\MSI\\AppData\\Roaming\\Python\\Python314\\Scripts\\yt-dlp.exe',
-    ];
+        path.join(os.homedir(), '.local', 'bin', 'yt-dlp'),
+        path.join(os.homedir(), 'AppData', 'Roaming', 'Python', 'Python314', 'Scripts', 'yt-dlp.exe'),
+        path.join(os.homedir(), 'AppData', 'Roaming', 'Python', 'Python313', 'Scripts', 'yt-dlp.exe'),
+        path.join(os.homedir(), 'AppData', 'Local', 'Programs', 'Python', 'Python313', 'Scripts', 'yt-dlp.exe'),
+        path.join(os.homedir(), '.pyenv', 'shims', 'yt-dlp'),
+    ].filter(Boolean);
     for (const c of candidates) {
         try {
+            if (c === 'yt-dlp' || c === 'yt-dlp.exe') {
+                // Bare command names must actually be resolvable on PATH.
+                const pathVar = process.env.PATH || '';
+                const found = pathVar
+                    .split(path.delimiter)
+                    .filter(Boolean)
+                    .some((dir) => fs.existsSync(path.join(dir, c)));
+                if (found)
+                    return c;
+                continue;
+            }
             if (fs.existsSync(c))
                 return c;
         }
         catch { }
     }
-    return 'yt-dlp';
+    return null;
+}
+/** True when yt-dlp is usable on this host (optional dependency). */
+export function hasYtDlp() {
+    return findYtDlp() !== null;
 }
 /** Parse a Netscape cookies.txt into Playwright cookie objects. */
 function parseNetscapeCookies(text) {
@@ -313,21 +365,37 @@ export class TikTokProvider {
         catch {
             // Fallback
         }
-        // Step 3: Fetch the TikTok page to extract video URL from embedded data
+        // Step 3: Pull the page HTML. TikTok answers plain desktop fetches with a
+        // Slardar WAF challenge (a ~1 KB "Please wait..." stub with no media data),
+        // so this retries with a phone user agent and finally with the
+        // server-rendered mobile watch page, whose rehydration payload carries
+        // playAddr/downloadAddr without needing a headless browser.
+        let html = '';
+        let httpCreds = {};
         try {
-            const pageRes = await fetch(resolvedUrl, {
-                headers: {
-                    'User-Agent': UA,
-                    Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                    'Accept-Language': 'en-US,en;q=0.9',
-                    'sec-fetch-mode': 'navigate',
-                    'sec-fetch-dest': 'document',
-                },
-                redirect: 'follow',
-                signal: AbortSignal.timeout(10000),
-            });
-            if (pageRes.ok) {
-                const html = await pageRes.text();
+            const httpResult = await this.extractViaHttp(resolvedUrl);
+            html = httpResult.html;
+            httpCreds = { cookie: httpResult.cookies, ua: httpResult.ua };
+            if (process.env.TT_DEBUG) {
+                console.log('[tt-debug] extractViaHttp videoUrl =', httpResult.videoUrl?.slice(0, 100));
+            }
+            if (httpResult.videoUrl) {
+                directVideoUrl = httpResult.videoUrl;
+                isAuthorized = true;
+            }
+            if (httpResult.title && title === 'TikTok Media')
+                title = httpResult.title;
+            if (httpResult.author && author === 'TikTok Creator')
+                author = httpResult.author;
+            if (httpResult.thumbnail && !thumbnail)
+                thumbnail = httpResult.thumbnail;
+            if (httpResult.duration)
+                duration = httpResult.duration;
+            if (httpResult.width)
+                width = httpResult.width;
+            if (httpResult.height)
+                height = httpResult.height;
+            {
                 // Parse __UNIVERSAL_DATA_FOR_REHYDRATION__ or SIGI_STATE
                 const hydrationMatch = html.match(/<script[^>]*id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>([\s\S]*?)<\/script>/i) ||
                     html.match(/<script[^>]*id="SIGI_STATE"[^>]*>([\s\S]*?)<\/script>/i) ||
@@ -389,9 +457,11 @@ export class TikTokProvider {
                         }
                     }
                 }
-                // Headless-browser fallback: TikTok serves a WAF challenge to plain fetch,
-                // so render the page with Playwright and capture the real CDN video URL.
-                if (!directVideoUrl) {
+                // Headless-browser fallback: TikTok may still serve a WAF challenge to
+                // plain fetches, so render the page when a Chromium binary exists.
+                // Skipped entirely when Playwright's browser is not installed (the
+                // default on Render's native Node image) instead of throwing.
+                if (!directVideoUrl && (await this.playwrightAvailable())) {
                     try {
                         const { chromium } = await import('playwright');
                         const cookiesPath = findCookiesFile();
@@ -456,6 +526,23 @@ export class TikTokProvider {
                             }
                             else {
                                 found = undefined;
+                            }
+                            if (found) {
+                                // The signed CDN URL must be replayed with the session cookies
+                                // the browser collected, otherwise TikTok responds 403.
+                                let pwCookies = '';
+                                try {
+                                    pwCookies = (await page.context().cookies())
+                                        .map((c) => `${c.name}=${c.value}`)
+                                        .join('; ');
+                                }
+                                catch { }
+                                rememberStreamCredentials(found, {
+                                    cookie: pwCookies || undefined,
+                                    userAgent: UA,
+                                    referer: TIKTOK_REFERER,
+                                    origin: TIKTOK_ORIGIN,
+                                });
                             }
                             // Also pull real title/author/thumbnail/duration from the page state
                             try {
@@ -544,6 +631,20 @@ export class TikTokProvider {
         catch {
             // Page fetch failed, continue with oEmbed data
         }
+        // A URL found through the og:/regex fallbacks of the page we already
+        // fetched never went through `extractViaHttp`'s remember step, so record
+        // the page cookies now — replaying the signed URL without them is a 403.
+        if (directVideoUrl && !getStreamCredentials(directVideoUrl)) {
+            rememberStreamCredentials(directVideoUrl, {
+                cookie: httpCreds.cookie || undefined,
+                userAgent: httpCreds.ua || UA,
+                referer: TIKTOK_REFERER,
+                origin: TIKTOK_ORIGIN,
+            });
+        }
+        if (process.env.TT_DEBUG) {
+            console.log('[tt-debug] final directVideoUrl =', directVideoUrl?.slice(0, 100), '| creds =', JSON.stringify(directVideoUrl ? getStreamCredentials(directVideoUrl) : undefined)?.slice(0, 300));
+        }
         if (!directVideoUrl) {
             // yt-dlp with an authenticated cookies.txt will work where Playwright is
             // blocked by TikTok's IP/login checks.
@@ -613,6 +714,184 @@ export class TikTokProvider {
             rawVideoUrl: directVideoUrl,
             rawAudioUrl: audioOnlyUrl,
         };
+    }
+    /**
+     * Detect TikTok's anti-bot challenge stub. It is a tiny HTML page with no
+     * rehydration payload, so treating it as a successful fetch (as the code
+     * used to) silently yields no playable stream.
+     */
+    isWafChallenge(html) {
+        if (!html || html.length < 5000)
+            return true;
+        if (/wafchallengeid|SlardarWAF|Please wait\.\.\./i.test(html)) {
+            return !/__UNIVERSAL_DATA_FOR_REHYDRATION__|SIGI_STATE/.test(html);
+        }
+        return false;
+    }
+    extractVideoIdFromUrl(url) {
+        const match = url.match(/\/video\/(\d{6,})/) || url.match(/[?&]item_id=(\d{6,})/);
+        return match ? match[1] : null;
+    }
+    buildVideoPageAttempts(pageUrl) {
+        const attempts = [
+            { target: pageUrl, ua: UA },
+            { target: pageUrl, ua: MOBILE_UA },
+        ];
+        const videoId = this.extractVideoIdFromUrl(pageUrl);
+        // Server-rendered mobile watch page: full playAddr + metadata, no JS needed.
+        if (videoId)
+            attempts.push({ target: `https://m.tiktok.com/v/${videoId}.html`, ua: MOBILE_UA });
+        return attempts;
+    }
+    async fetchVideoPageHtml(target, ua) {
+        try {
+            const res = await fetch(target, {
+                headers: {
+                    'User-Agent': ua,
+                    Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    'sec-fetch-mode': 'navigate',
+                    'sec-fetch-dest': 'document',
+                    Referer: TIKTOK_REFERER,
+                },
+                redirect: 'follow',
+                signal: AbortSignal.timeout(12000),
+            });
+            if (!res.ok)
+                return null;
+            const html = await res.text();
+            if (this.isWafChallenge(html))
+                return null;
+            const rawCookies = res.headers.getSetCookie?.() ?? [];
+            const cookies = rawCookies
+                .map((c) => String(c).split(';')[0])
+                .filter(Boolean)
+                .join('; ');
+            return { html, cookies };
+        }
+        catch {
+            return null;
+        }
+    }
+    /**
+     * Try every HTTP strategy that works without a browser and return the first
+     * one that exposes a direct video stream (plus whatever metadata it had).
+     * The cookies issued alongside the page are recorded because TikTok signs
+     * playAddr against the `tt_chain_token` cookie — without them the CDN 403s.
+     */
+    async extractViaHttp(pageUrl) {
+        let fallback = null;
+        for (const attempt of this.buildVideoPageAttempts(pageUrl)) {
+            const page = await this.fetchVideoPageHtml(attempt.target, attempt.ua);
+            if (!page)
+                continue;
+            if (!fallback)
+                fallback = { html: page.html, cookies: page.cookies, ua: attempt.ua };
+            const extracted = this.extractFromHtml(page.html);
+            if (extracted.videoUrl) {
+                if (process.env.TT_DEBUG) {
+                    console.log(`[tt-debug] remember ${extracted.videoUrl.slice(0, 100)} (attempt=${attempt.target.slice(0, 60)}, cookies=${(page.cookies || '').length})`);
+                }
+                rememberStreamCredentials(extracted.videoUrl, {
+                    cookie: page.cookies || undefined,
+                    userAgent: attempt.ua,
+                    referer: TIKTOK_REFERER,
+                    origin: TIKTOK_ORIGIN,
+                });
+                return { html: page.html, cookies: page.cookies, ua: attempt.ua, ...extracted };
+            }
+        }
+        // No playAddr on any attempt — hand back the first usable page so the
+        // caller's og:/regex fallbacks can still find a URL, together with the
+        // cookies that page set (the CDN needs them to replay the URL).
+        return fallback ? { html: fallback.html, cookies: fallback.cookies, ua: fallback.ua } : { html: '' };
+    }
+    /** Extract a direct stream URL plus metadata from an already-fetched page. */
+    extractFromHtml(html) {
+        const out = {};
+        const hydrateMatch = html.match(/<script[^>]*id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>([\s\S]*?)<\/script>/i) ||
+            html.match(/<script[^>]*id="SIGI_STATE"[^>]*>([\s\S]*?)<\/script>/i) ||
+            html.match(/<script[^>]*id="__NUXT__"[^>]*>([\s\S]*?)<\/script>/i) ||
+            html.match(/<script[^>]*id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/i);
+        if (hydrateMatch) {
+            try {
+                this.extractVideoFromState(JSON.parse(hydrateMatch[1]), (data) => {
+                    if (data.videoUrl && !out.videoUrl && this.isDirectVideoStreamUrl(data.videoUrl)) {
+                        out.videoUrl = data.videoUrl;
+                    }
+                    if (data.title && !out.title)
+                        out.title = data.title;
+                    if (data.author && !out.author)
+                        out.author = data.author;
+                    if (data.thumbnail && !out.thumbnail)
+                        out.thumbnail = data.thumbnail;
+                    if (data.duration && !out.duration)
+                        out.duration = data.duration;
+                    if (data.width && !out.width)
+                        out.width = data.width;
+                    if (data.height && !out.height)
+                        out.height = data.height;
+                });
+            }
+            catch {
+                // JSON parse failed
+            }
+        }
+        if (!out.videoUrl) {
+            const ogVideo = html.match(/<meta\s+property="og:video"\s+content="([^"]+)"/i) ||
+                html.match(/<meta\s+property="og:video:secure_url"\s+content="([^"]+)"/i);
+            if (ogVideo) {
+                const candidate = ogVideo[1].replace(/&amp;/g, '&');
+                if (this.isDirectVideoStreamUrl(candidate))
+                    out.videoUrl = candidate;
+            }
+        }
+        if (!out.videoUrl) {
+            const videoPatterns = [
+                /https?:\/\/[a-zA-Z0-9.-]*tiktokcdn\.com\/[^\s"'<>]+\.mp4[^\s"'<>]*/i,
+                /https?:\/\/v[0-9]*\.tiktokcdn\.com\/[^\s"'<>]+/i,
+                /https?:\/\/[a-zA-Z0-9.-]*tiktokv\.com\/[^\s"'<>]+\.mp4[^\s"'<>]*/i,
+                /https?:\/\/[a-zA-Z0-9.-]*tikcdn\.net\/[^\s"'<>]+\.mp4[^\s"'<>]*/i,
+                /https?:\/\/[a-zA-Z0-9.-]*tiktok\.com\/[^\s"'<>]+\.mp4[^\s"'<>]*/i,
+                /https?:\/\/v\d+-webapp-prime\.tiktok\.com\/[^\s"'<>]+/i,
+            ];
+            for (const pattern of videoPatterns) {
+                const m = html.match(pattern);
+                if (!m)
+                    continue;
+                const candidate = this.cleanUrl(m[0]);
+                if (this.isDirectVideoStreamUrl(candidate)) {
+                    out.videoUrl = candidate;
+                    break;
+                }
+            }
+        }
+        if (!out.title) {
+            const ogTitle = html.match(/<meta\s+property="og:title"\s+content="([^"]+)"/i) ||
+                html.match(/<meta\s+property="og:description"\s+content="([^"]+)"/i);
+            if (ogTitle)
+                out.title = this.decodeHtmlEntities(ogTitle[1]).slice(0, 200);
+        }
+        if (!out.thumbnail) {
+            const ogImg = html.match(/<meta\s+property="og:image"\s+content="([^"]+)"/i);
+            if (ogImg)
+                out.thumbnail = ogImg[1];
+        }
+        return out;
+    }
+    /** Playwright is an optional dependency: the npm package ships without the
+     *  browser binary, and Render's native Node image has no Chromium at all. */
+    async playwrightAvailable() {
+        if (process.env.PLAYWRIGHT_DISABLE === '1')
+            return false;
+        try {
+            const { chromium } = await import('playwright');
+            const executable = chromium.executablePath();
+            return !!executable && fs.existsSync(executable);
+        }
+        catch {
+            return false;
+        }
     }
     /**
      * Recursively search TikTok's rehydration state for video data
@@ -692,14 +971,23 @@ export class TikTokProvider {
         // a query mime_type=video, or a .mp4 path.
         return /mime_type=video|\.mp4(\?|$)|\/aweme\/v\d+\/play|\/social\/play|videoplayback/i.test(url);
     }
+    /**
+     * Extract stream URLs with the optional yt-dlp binary.
+     *
+     * TikTok signs the returned `playAddr` against the cookie jar yt-dlp used to
+     * fetch it, so the jar is replayed together with the URL — without it the
+     * CDN answers HTTP 403.
+     */
     async ytDlpExtractMedia(url) {
+        const ytdlp = findYtDlp();
+        if (!ytdlp)
+            return undefined;
+        const userCookies = findCookiesFile();
+        const jar = userCookies || path.join(os.tmpdir(), `tt-ytdlp-${process.pid}-${Date.now()}.cookies.txt`);
         try {
-            const cookies = findCookiesFile();
-            const args = ['--no-warnings', '--dump-single-json', '--no-playlist'];
-            if (cookies)
-                args.push('--cookies', cookies);
+            const args = ['--no-warnings', '--dump-single-json', '--no-playlist', '--cookies', jar];
             args.push(url);
-            const { stdout } = await execFileAsync(findYtDlp(), args, {
+            const { stdout } = await execFileAsync(ytdlp, args, {
                 timeout: 90000,
                 maxBuffer: 64 * 1024 * 1024,
             });
@@ -725,6 +1013,21 @@ export class TikTokProvider {
             }
             const v = videoCandidates.find((u) => this.isDirectVideoStreamUrl(u));
             const a = audioCandidates.find((u) => typeof u === 'string' && /^https?:/i.test(u));
+            if (v || a) {
+                const cookieHeader = readCookieJarHeader(jar);
+                if (cookieHeader) {
+                    for (const u of [v, a]) {
+                        if (!u)
+                            continue;
+                        rememberStreamCredentials(u, {
+                            cookie: cookieHeader,
+                            userAgent: UA,
+                            referer: TIKTOK_REFERER,
+                            origin: TIKTOK_ORIGIN,
+                        });
+                    }
+                }
+            }
             if (v)
                 return { videoUrl: v };
             if (a)
@@ -733,16 +1036,27 @@ export class TikTokProvider {
         catch (err) {
             console.error('yt-dlp TikTok extract failed:', err.message);
         }
+        finally {
+            if (!userCookies) {
+                try {
+                    fs.unlinkSync(jar);
+                }
+                catch { }
+            }
+        }
         return undefined;
     }
     async ytDlpProfileVideos(url, author) {
         try {
+            const ytdlp = findYtDlp();
+            if (!ytdlp)
+                return [];
             const cookies = findCookiesFile();
             const args = ['--flat-playlist', '--dump-json', '--no-warnings', '--playlist-end', '50'];
             if (cookies)
                 args.push('--cookies', cookies);
             args.push(url);
-            const { stdout } = await execFileAsync(findYtDlp(), args, {
+            const { stdout } = await execFileAsync(ytdlp, args, {
                 timeout: 120000,
                 maxBuffer: 64 * 1024 * 1024,
             });

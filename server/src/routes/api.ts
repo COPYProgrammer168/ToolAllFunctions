@@ -3,6 +3,7 @@ import multer from 'multer';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { createReadStream, createWriteStream } from 'node:fs';
+import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { nanoid } from 'nanoid';
 import { VideoAnalyzer } from '../services/VideoAnalyzer.js';
@@ -17,6 +18,9 @@ import { OutroDetector } from '../services/OutroDetector.js';
 import { WatermarkEditor } from '../services/WatermarkEditor.js';
 import { ImageProcessor, type SupportedImageFormat } from '../services/ImageProcessor.js';
 import { sanitizeFilename } from '../utils/security.js';
+import { downloadToFile } from '../utils/httpDownload.js';
+import { buildStreamHeaders, getStreamCredentials } from '../services/StreamCredentials.js';
+import { ffprobeBin, ffmpegBin } from '../utils/binaries.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -291,20 +295,22 @@ apiRouter.get('/media/stream', async (req, res) => {
     if (!target || !/^https?:\/\//i.test(target)) {
       return res.status(400).json({ error: 'A valid url is required.' });
     }
-    const headers: Record<string, string> = {
-      'User-Agent':
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    };
-    if (/tiktok|tikcdn/i.test(target)) {
-      headers['Referer'] = 'https://www.tiktok.com/';
-      headers['Origin'] = 'https://www.tiktok.com';
-    }
+    const headers: Record<string, string> = buildStreamHeaders(target);
     if (typeof req.headers.range === 'string') {
       headers['Range'] = req.headers.range;
+    } else if (/googlevideo\.com/i.test(target)) {
+      // Google's audio/video endpoints answer a Range-less request with a 200
+      // + Content-Length and then never stream the body; an open-ended Range
+      // makes them deliver the full resource as a 206.
+      headers['Range'] = 'bytes=0-';
     }
 
     const upstream = await fetch(target, { headers });
     if (!upstream.ok && upstream.status !== 206) {
+      const hadCreds = !!getStreamCredentials(target);
+      console.warn(
+        `[media/stream] upstream ${upstream.status} for ${target.slice(0, 140)} (cached credentials: ${hadCreds ? 'yes' : 'no'}, cookie: ${!!headers.Cookie})`
+      );
       return res.status(upstream.status).send(`Upstream returned ${upstream.status}`);
     }
 
@@ -319,18 +325,10 @@ apiRouter.get('/media/stream', async (req, res) => {
 
     const body = upstream.body;
     if (!body) return res.status(502).send('No upstream body');
-    // Node >= 18 web stream reader
-    const reader = body.getReader();
-    const pump = async (): Promise<void> => {
-      const { done, value } = await reader.read();
-      if (done) {
-        res.end();
-        return;
-      }
-      res.write(Buffer.from(value));
-      return pump();
-    };
-    return pump();
+    const stream = Readable.fromWeb(body as any);
+    res.on('close', () => stream.destroy());
+    stream.pipe(res);
+    return;
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Proxy failed' });
   }
@@ -354,11 +352,7 @@ apiRouter.get('/media/merge-preview', async (req, res) => {
     const videoTmp = path.join(tmpDir, `pv_${id}.bin`);
     const audioTmp = path.join(tmpDir, `pa_${id}.bin`);
     const merged = path.join(tmpDir, `pm_${id}.mp4`);
-    const ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36';
-    await Promise.all([
-      execAsync(`curl.exe -sL -A "${ua}" -o "${videoTmp}" "${v}"`),
-      execAsync(`curl.exe -sL -A "${ua}" -o "${audioTmp}" "${a}"`),
-    ]);
+    await Promise.all([downloadToFile(v, videoTmp), downloadToFile(a, audioTmp)]);
     await execAsync(`ffmpeg -y -i "${videoTmp}" -i "${audioTmp}" -c:v copy -c:a aac -movflags +faststart "${merged}"`);
     await fs.unlink(videoTmp).catch(() => {});
     await fs.unlink(audioTmp).catch(() => {});
@@ -386,11 +380,27 @@ apiRouter.post('/media/probe-bitrate', async (req, res) => {
       return res.status(400).json({ error: 'No stream URL provided.' });
     }
 
-    const { exec } = await import('node:child_process');
+    const { execFile } = await import('node:child_process');
     const { promisify } = await import('node:util');
-    const execAsync = promisify(exec);
-    const cmd = `ffprobe -v quiet -print_format json -show_format -show_streams "${streamUrl}"`;
-    const { stdout } = await execAsync(cmd, { maxBuffer: 10 * 1024 * 1024 });
+    const execFileAsync = promisify(execFile);
+
+    // googlevideo / TikTok CDNs reject bare ffprobe requests, so forward the
+    // same headers the download path uses.
+    const probeHeaders = buildStreamHeaders(streamUrl);
+    const userAgent = probeHeaders['User-Agent'];
+    delete probeHeaders['User-Agent'];
+    const headerArgs: string[] = [];
+    if (userAgent) headerArgs.push('-user_agent', userAgent);
+    const headerBlock = Object.entries(probeHeaders)
+      .map(([k, v]) => `${k}: ${v}`)
+      .join('\r\n');
+    if (headerBlock) headerArgs.push('-headers', `${headerBlock}\r\n`);
+
+    const { stdout } = await execFileAsync(
+      ffprobeBin(),
+      ['-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', ...headerArgs, streamUrl],
+      { maxBuffer: 10 * 1024 * 1024 }
+    );
     const probe = JSON.parse(stdout);
     const audioStream = (probe.streams || []).find((s: any) => s.codec_type === 'audio');
     const bitRate =
@@ -440,7 +450,13 @@ apiRouter.post('/media/download', async (req, res) => {
                 resolved.availableFormats.find((f) => f.type === 'video' && f.directDownloadUrl)?.directDownloadUrl;
           if (!direct) {
             return res.status(400).json({
-              error: 'Could not resolve a direct downloadable stream for this URL (private, region-locked, or DRM protected).',
+              error:
+                resolved.authorizedNotice ||
+                'Could not resolve a direct downloadable stream for this URL (private, region-locked, age-restricted, or DRM protected). Try re-running the analysis or paste a direct media file link.',
+              technicalDetails: {
+                platform: resolved.platform,
+                downloadAuthorized: resolved.downloadAuthorized,
+              },
             });
           }
           downloadTargetUrl = direct;
@@ -475,22 +491,23 @@ apiRouter.post('/media/download', async (req, res) => {
       try {
         let downloadedSource: string;
         if (muxUrls) {
-          // googlevideo CDN rejects plain ffmpeg HTTP probes, so download via
-          // curl (which sends the required Range request) then mux locally.
-          const { exec: execCb } = await import('node:child_process');
-          const { promisify } = await import('node:util');
-          const execAsync = promisify(execCb);
+          // googlevideo CDN rejects plain ffmpeg HTTP probes, so download both
+          // tracks with ranged HTTP requests first, then mux locally.
           const jobDir = job.outputPath.replace(/[\\/][^\\/]+$/, '');
           const videoTmp = path.join(jobDir, `tmp_video_${job.id}.bin`);
           const audioTmp = path.join(jobDir, `tmp_audio_${job.id}.bin`);
-          const ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36';
           await Promise.all([
-            execAsync(`curl.exe -sL -A "${ua}" -o "${videoTmp}" "${muxUrls.video}"`),
-            execAsync(`curl.exe -sL -A "${ua}" -o "${audioTmp}" "${muxUrls.audio}"`),
+            downloadToFile(muxUrls.video, videoTmp, { timeoutMs: 30 * 60 * 1000 }),
+            downloadToFile(muxUrls.audio, audioTmp, { timeoutMs: 30 * 60 * 1000 }),
           ]);
-          await execAsync(
-            `ffmpeg -y -i "${videoTmp}" -i "${audioTmp}" -c:v copy -c:a aac -movflags +faststart "${job.outputPath}"`
-          );
+          const { execFile } = await import('node:child_process');
+          await new Promise<void>((resolve, reject) => {
+            execFile(
+              ffmpegBin(),
+              ['-y', '-i', videoTmp, '-i', audioTmp, '-c:v', 'copy', '-c:a', 'aac', '-movflags', '+faststart', job.outputPath],
+              (err) => (err ? reject(err) : resolve())
+            );
+          });
           await fs.unlink(videoTmp).catch(() => {});
           await fs.unlink(audioTmp).catch(() => {});
           downloadedSource = job.outputPath;

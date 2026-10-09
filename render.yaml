@@ -1,51 +1,44 @@
+# Native Node deployment for Render (no Docker).
+#
+# Notes:
+#  * ffmpeg/ffprobe come from the `ffmpeg-static` / `ffprobe-static` npm
+#    packages (see server/src/utils/binaries.ts) — no system ffmpeg needed.
+#  * yt-dlp is installed as an OPTIONAL best-effort fallback for extraction;
+#    the pure-HTTP providers do not require it.
+#  * Playwright browsers are intentionally not downloaded (they need system
+#    libraries a native Node instance cannot install). TikTok extraction uses
+#    its HTTP path first and degrades gracefully without a browser.
 services:
   - type: web
     name: ai-video-optimizer
     env: node
     plan: free
     buildCommand: |
+      pip3 install --user yt-dlp || echo "yt-dlp install skipped (optional fallback)"
       npm install
-      npm install --prefix server
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install --prefix server
       npm install --prefix client
       npm run build --prefix client
       npm run build --prefix server
-    startCommand: npm run start --prefix server
+    startCommand: 'export PATH="$HOME/.local/bin:$PATH"; npm run start --prefix server'
     envVars:
+      - key: NODE_VERSION
+        value: "22"
+      # Render routes traffic to $PORT; the server defaults to 3001 locally.
       - key: PORT
-        fromService: ""
+        value: "10000"
+      - key: PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD
+        value: "1"
+      # Optional: set these in the Render dashboard to persist uploads/jobs
+      # across restarts (attach a persistent disk first).
       - key: STORAGE_DIR
         sync: false
       - key: JOBS_DB_PATH
         sync: false
+    healthCheckPath: /health
+    restartPolicy: always
     # Persistent disk (optional, uncomment to enable):
     # persistentDisk:
     #   size: 10GB
-    #   mountPath: /mnt/data
-    # healthCheckPath: /health
-    # restartPolicy: always
-
-services:
-  - type: web
-    name: ai-video-optimizer
-    env: node
-    plan: starter
-    buildCommand: |
-      npm install
-      npm install --prefix server
-      npm install --prefix client
-      npm run build --prefix client
-      npm run build --prefix server
-    startCommand: npm run start --prefix server
-    envVars:
-      - key: PORT
-        fromService: ""
-      - key: STORAGE_DIR
-        sync: false
-      - key: JOBS_DB_PATH
-        sync: false
-    # Optional persistent disk for SQLite + uploads persistence across restarts
-    # persistentDisk:
-    #   size: 10GB
-    #   mountPath: /mnt/data
-    healthCheckPath: /health
-    restartPolicy: always
+    #   mountPath: /data
+    #   name: video-optimizer-data

@@ -56,12 +56,17 @@ export class YouTubeProvider implements IMediaProvider {
     let adaptiveVideoFps: number | undefined;
     let videoResolution: string | undefined;
     let videoFps: number | undefined;
+    let videoDurationSec = 0;
+    let playabilityReason: string | undefined;
 
     try {
       const pageRes = await fetch(url, {
         headers: {
           'User-Agent': UA,
           'Accept-Language': 'en-US,en;q=0.9',
+          // Skip the EU consent interstitial so the embedded player config
+          // (API key + visitor data) is present in the HTML.
+          Cookie: 'SOCS=CAI; CONSENT=PENDING+999',
         },
         redirect: 'follow',
         signal: AbortSignal.timeout(8000),
@@ -69,12 +74,15 @@ export class YouTubeProvider implements IMediaProvider {
       if (pageRes.ok) {
         const html = await pageRes.text();
         const apiKey = html.match(/"INNERTUBE_API_KEY":"([^"]+)"/)?.[1];
+        const visitorData =
+          html.match(/"visitorData":"([^"]+)"/)?.[1] || html.match(/ytcfg\.set\(\{[^]*?"VISITOR_DATA":"([^"]+)"/)?.[1];
         if (apiKey) {
           const clients = [
-            { clientName: 'ANDROID', clientVersion: '20.10.38', androidSdkVersion: 30 },
-            { clientName: 'ANDROID_VR', clientVersion: '1.57.27', androidSdkVersion: 32, osVersion: '12' },
-            { clientName: 'IOS', clientVersion: '21.02.3', deviceMake: 'Apple', deviceModel: 'iPhone16,2' },
+            { clientName: 'ANDROID', clientVersion: '20.10.38', androidSdkVersion: 30, osName: 'Android', osVersion: '12' },
+            { clientName: 'ANDROID_VR', clientVersion: '1.57.27', androidSdkVersion: 32, osName: 'Android', osVersion: '12' },
+            { clientName: 'IOS', clientVersion: '21.02.3', deviceMake: 'Apple', deviceModel: 'iPhone16,2', osName: 'iOS', osVersion: '17.5.1' },
             { clientName: 'WEB', clientVersion: '2.20250610.01.00' },
+            { clientName: 'TVHTML5', clientVersion: '7.20250316.18.00' },
           ];
           for (const client of clients) {
             try {
@@ -83,13 +91,32 @@ export class YouTubeProvider implements IMediaProvider {
                 headers: {
                   'Content-Type': 'application/json',
                   'User-Agent': UA,
+                  ...(visitorData ? { 'X-Goog-Visitor-Id': visitorData } : {}),
                 },
-                body: JSON.stringify({ context: { client }, videoId, contentCheckOk: true, racyCheckOk: true }),
+                body: JSON.stringify({
+                  context: {
+                    client: { ...client, hl: 'en', gl: 'US', ...(visitorData ? { visitorData } : {}) },
+                  },
+                  videoId,
+                  contentCheckOk: true,
+                  racyCheckOk: true,
+                }),
                 signal: AbortSignal.timeout(8000),
               });
               if (!playerRes.ok) continue;
               const data = (await playerRes.json()) as any;
-              if (data?.playabilityStatus?.status && data.playabilityStatus.status !== 'OK') continue;
+              if (data?.playabilityStatus?.status && data.playabilityStatus.status !== 'OK') {
+                playabilityReason =
+                  data.playabilityStatus?.reason ||
+                  data.playabilityStatus?.messages?.[0] ||
+                  `playability status ${data.playabilityStatus.status}`;
+                continue;
+              }
+
+              const lengthSeconds = Number(data?.videoDetails?.lengthSeconds);
+              if (Number.isFinite(lengthSeconds) && lengthSeconds > 0) {
+                videoDurationSec = lengthSeconds;
+              }
 
               // True muxed (audio+video) streams live in `formats`; entries in
               // `adaptiveFormats` are video-only or audio-only and must not be
@@ -99,9 +126,9 @@ export class YouTubeProvider implements IMediaProvider {
                 .filter((f: any) => f.url && /video\/mp4/.test(f.mimeType || ''))
                 .sort((a: any, b: any) => (b.bitrate || 0) - (a.bitrate || 0));
               if (muxedOnly.length > 0) {
-                directVideoUrl = muxedOnly[0].url;
-                videoResolution = muxedOnly[0].qualityLabel || muxedOnly[0].quality;
-                videoFps = muxedOnly[0].fps;
+                directVideoUrl = directVideoUrl || muxedOnly[0].url;
+                videoResolution = videoResolution || muxedOnly[0].qualityLabel || muxedOnly[0].quality;
+                videoFps = videoFps || muxedOnly[0].fps;
               }
 
               // Best adaptive video-only stream (used for muxing when no
@@ -128,10 +155,15 @@ export class YouTubeProvider implements IMediaProvider {
                 .filter((f: any) => f.url && /audio\/mp4/.test(f.mimeType || ''))
                 .sort((a: any, b: any) => (b.bitrate || 0) - (a.bitrate || 0));
               if (audio.length > 0) {
-                directAudioUrl = audio[0].url;
+                directAudioUrl = directAudioUrl || audio[0].url;
               }
 
-              if (directVideoUrl || directAudioUrl) break;
+              // Keep trying client profiles until we have both a playable
+              // video stream and an audio stream (a muxed stream supplies
+              // audio on its own, but an audio-only track is still preferred
+              // for the audio extraction formats).
+              const haveVideo = !!(directVideoUrl || adaptiveVideoUrl);
+              if (haveVideo && (directAudioUrl || directVideoUrl)) break;
             } catch {
               // Try the next client profile
             }
@@ -202,12 +234,14 @@ export class YouTubeProvider implements IMediaProvider {
       title,
       creator: author,
       thumbnail,
-      duration: 0,
+      duration: videoDurationSec,
       mediaType: 'video',
       downloadAuthorized,
       authorizedNotice: downloadAuthorized
         ? undefined
-        : 'This media cannot be downloaded through this tool because the platform does not provide an authorized download method for it right now (blocked, age-restricted, or requires sign-in).',
+        : `This media cannot be downloaded through this tool because the platform does not provide an authorized download method for it right now${
+            playabilityReason ? ` (${playabilityReason})` : ' (blocked, age-restricted, or requires sign-in)'
+          }.`,
       copyrightNotice:
         'This tool respects content rights. Use only for content you own or where an authorized download is provided.',
       availableFormats: formats,
