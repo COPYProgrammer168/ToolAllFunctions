@@ -1,0 +1,85 @@
+# =============================================================================
+# ALTERNATIVE — node:22-slim (Debian bookworm, glibc) instead of node:22-alpine.
+# NOT referenced by render.yaml (Render here uses the native Node environment
+# with ffmpeg-static). Provided only to compare the two approaches:
+#
+#   docker build -f Dockerfile     -t ai-video-optimizer:alpine .   # current
+#   docker build -f Dockerfile.slim -t ai-video-optimizer:slim   .   # this one
+#
+# Differences vs. the Alpine variant
+#   * apk add  -> apt-get install
+#   * Prebuilt binaries actually exist for glibc: better-sqlite3 and
+#     ffmpeg-static download prebuilds instead of compiling, so the image
+#     builds faster (ffmpeg-static still works as a fallback on Alpine only
+#     when it is compiled — Alpine uses the apk ffmpeg here).
+#   * Playwright's Debian dependency installer works out of the box
+#     (`playwright install --with-deps chromium`), which Alpine only supports
+#     experimentally.
+#   * Larger base image (~80 MB vs ~50 MB) and no musl edge cases.
+# =============================================================================
+
+FROM node:22-slim AS builder
+
+# Build dependencies: ffmpeg + a C/C++ toolchain + python for node-gyp.
+# python3 is required by node-gyp even when headers are already present.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ffmpeg \
+        python3 \
+        make \
+        g++ \
+        git \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY server/package*.json ./server/
+COPY client/package*.json ./client/
+
+# Use the Node headers bundled in the image instead of downloading them from
+# unofficial-builds.nodejs.org (that fetch times out behind many firewalls).
+ENV npm_config_nodedir=/usr/local
+
+RUN npm install --prefix server
+RUN npm install --prefix client
+
+COPY server ./server
+COPY client ./client
+
+RUN mkdir -p /app/storage
+
+# Playwright browsers + their system libraries (Debian only).
+RUN npx playwright install --with-deps chromium
+
+RUN npm run build --prefix client
+RUN npm run build --prefix server
+
+# -----------------------------------------------------------------------------
+# Production stage
+FROM node:22-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ffmpeg \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY --from=builder /app/server/dist ./server/dist
+COPY --from=builder /app/server/node_modules ./server/node_modules
+COPY --from=builder /app/client/dist ./client/dist
+COPY --from=builder /app/client/node_modules ./client/node_modules
+COPY --from=builder /app/storage ./storage
+
+# Playwright browsers live in the home cache directory, not in node_modules —
+# copy them so the optional TikTok headless fallback keeps working.
+COPY --from=builder /root/.cache/ms-playwright /root/.cache/ms-playwright
+
+WORKDIR /app/server
+
+ENV PORT=3001
+EXPOSE 3001
+
+CMD ["node", "dist/server.js"]

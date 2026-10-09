@@ -20,6 +20,10 @@ COPY client/package*.json ./client/
 
 # Install server deps (includes better-sqlite3 native build)
 # Using --prefix so better-sqlite3 compiles with system libs (ffmpeg, python from builder stage)
+# Use the Node headers bundled in the image instead of fetching them from
+# unofficial-builds.nodejs.org — that download times out (ETIMEDOUT) on
+# several networks/firewalls and node-gyp then fails to build better-sqlite3.
+ENV npm_config_nodedir=/usr/local
 RUN npm install --prefix server
 
 # Install client deps
