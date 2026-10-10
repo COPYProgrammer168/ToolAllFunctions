@@ -127,6 +127,65 @@ export function subscribeJobProgress(
 // MEDIA TOOLKIT API CLIENT
 // ============================================================================
 
+/**
+ * Error thrown by the media endpoints that keeps the server's status and
+ * machine-readable code so callers can react to specific conditions (notably
+ * `rate_limited`) instead of showing a raw message.
+ */
+export class MediaApiError extends Error {
+  readonly status: number;
+  readonly code?: string;
+  /** Seconds to wait before retrying (server `Retry-After` / `retry_after`). */
+  readonly retryAfter?: number;
+
+  constructor(message: string, options: { status: number; code?: string; retryAfter?: number }) {
+    super(message);
+    this.name = 'MediaApiError';
+    this.status = options.status;
+    this.code = options.code;
+    this.retryAfter = options.retryAfter;
+  }
+
+  /** True when the platform rate-limited this server's IP. */
+  get isRateLimited(): boolean {
+    return this.status === 429 || this.code === 'rate_limited';
+  }
+}
+
+/** Reads a JSON error body, tolerating non-JSON responses. */
+async function readErrorBody(res: Response): Promise<Record<string, any>> {
+  try {
+    return (await res.json()) as Record<string, any>;
+  } catch {
+    return {};
+  }
+}
+
+/** Number of seconds to wait, taken from the body (`retry_after`/`retryAfterSec`) or the header. */
+function retryAfterFrom(res: Response, body: Record<string, any>): number | undefined {
+  const fromBody = Number(body.retry_after ?? body.retryAfterSec);
+  if (Number.isFinite(fromBody) && fromBody > 0) return fromBody;
+  const header = Number(res.headers.get('Retry-After'));
+  return Number.isFinite(header) && header > 0 ? header : undefined;
+}
+
+/**
+ * Builds the error for a failed media request. `rate_limited` keeps that code
+ * (and its countdown) so the UI can render the wait state rather than failing.
+ */
+function mediaRequestError(res: Response, body: Record<string, any>, fallback: string): MediaApiError {
+  if (body.error === 'rate_limited') {
+    return new MediaApiError('Too many requests', {
+      status: 429,
+      code: 'rate_limited',
+      retryAfter: retryAfterFrom(res, body),
+    });
+  }
+  return new MediaApiError(typeof body.error === 'string' ? body.error : fallback, {
+    status: res.status,
+  });
+}
+
 import type {
   MediaAnalysisResult,
   MediaJobRecord,
@@ -144,10 +203,16 @@ export async function probeStreamBitrate(sourceUrl: string): Promise<number | nu
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sourceUrl }),
     });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok || typeof data.bitrateKbps !== 'number') return null;
-    return data.bitrateKbps;
-  } catch {
+    if (!res.ok) {
+      const body = await readErrorBody(res);
+      // Rate limiting must reach the caller so it can stop probing further tracks.
+      if (body.error === 'rate_limited') throw mediaRequestError(res, body, 'Too many requests');
+      return null;
+    }
+    const data = await res.json();
+    return typeof data.bitrateKbps === 'number' ? data.bitrateKbps : null;
+  } catch (err) {
+    if (err instanceof MediaApiError) throw err;
     return null;
   }
 }
@@ -160,8 +225,7 @@ export async function analyzeMediaUrl(url: string): Promise<MediaAnalysisResult>
   });
 
   if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.error || 'Failed to analyze media URL');
+    throw mediaRequestError(res, await readErrorBody(res), `Failed to analyze media URL (HTTP ${res.status})`);
   }
 
   return res.json();
@@ -186,8 +250,7 @@ export async function startMediaDownload(params: {
   });
 
   if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.error || 'Failed to initiate media download');
+    throw mediaRequestError(res, await readErrorBody(res), `Failed to initiate media download (HTTP ${res.status})`);
   }
 
   return res.json();

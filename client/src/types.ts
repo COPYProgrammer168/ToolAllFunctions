@@ -196,7 +196,13 @@ export interface MediaAnalysisResult {
     duration?: number;
     thumbnail?: string;
     mediaType?: 'video' | 'audio';
+    /** Platform track id (present for SoundCloud playlists). */
+    id?: number;
+    /** Set when the track is listed but not downloadable (private, region-blocked). */
+    unavailable?: string;
   }[];
+  /** Full size of a listing, used for the "TRACKS (55)" header. */
+  totalTracks?: number;
 }
 
 export type MediaJobType = 'video' | 'audio' | 'image' | 'converter' | 'watermark' | 'outro';

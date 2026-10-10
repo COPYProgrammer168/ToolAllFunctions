@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Link2,
   Search,
@@ -14,11 +14,26 @@ import {
   Copy,
   Play,
   Pause,
+  Timer,
   X,
 } from 'lucide-react';
 import type { MediaAnalysisResult, MediaFormatOption } from '../types';
-import { analyzeMediaUrl, startMediaDownload, probeStreamBitrate } from '../services/api';
+import { analyzeMediaUrl, startMediaDownload, probeStreamBitrate, MediaApiError } from '../services/api';
 import { playerStore, usePlayer } from '../services/player';
+
+/** How long to wait after typing stops before auto-analyzing a pasted URL. */
+const URL_DEBOUNCE_MS = 600;
+/** Fallback wait time when the server gives no `retry_after`. */
+const DEFAULT_RETRY_AFTER_SEC = 60;
+/** Long track lists scroll inside the card instead of stretching the page. */
+const TRACK_LIST_SCROLL_CLASS = 'max-h-[30rem] overflow-y-auto overscroll-contain';
+/** Green download-button styling, shared by the bulk action and per-track buttons. */
+const DOWNLOAD_BTN_BASE =
+  'px-3 py-1.5 rounded-lg border text-xs font-semibold flex items-center justify-center gap-1.5 transition-all duration-200 shrink-0';
+const DOWNLOAD_BTN_ACTIVE =
+  'bg-emerald-500/15 hover:bg-emerald-500 border-emerald-500/40 hover:border-emerald-500 text-emerald-300 hover:text-emerald-950';
+const DOWNLOAD_BTN_IDLE =
+  'bg-emerald-500/5 border-emerald-500/20 text-emerald-300/50 cursor-not-allowed';
 
 interface UniversalMediaInputProps {
   onMediaSelect?: (result: MediaAnalysisResult) => void;
@@ -56,11 +71,100 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
   const [cardPreviewUrl, setCardPreviewUrl] = useState<string | null>(null);
   const [cardPreviewStream, setCardPreviewStream] = useState<string | null>(null);
   const [cardPreviewLoading, setCardPreviewLoading] = useState<string | null>(null);
+  // Remaining seconds of a platform rate limit; buttons stay disabled while > 0.
+  const [rateLimitSeconds, setRateLimitSeconds] = useState(0);
   const { playing: isPlaying, currentId } = usePlayer();
+
+  // Debounced URL: analysis only fires once typing settles, never per keystroke.
+  const [debouncedUrl, setDebouncedUrl] = useState('');
+  const lastAnalyzedRef = useRef<string>('');
+
+  /** True while any request of this card is in flight. */
+  const isRequestInFlight =
+    isAnalyzing ||
+    downloadingId !== null ||
+    loadingPlayUrl !== null ||
+    previewLoading ||
+    cardPreviewLoading !== null;
+
+  /** Buttons stay disabled while a request runs, and during a rate-limit wait. */
+  const actionsDisabled = isRequestInFlight || rateLimitSeconds > 0;
+
+  // Tick the rate-limit countdown down once per second.
+  useEffect(() => {
+    if (rateLimitSeconds <= 0) return;
+    const timer = setTimeout(() => setRateLimitSeconds((s) => Math.max(0, s - 1)), 1000);
+    return () => clearTimeout(timer);
+  }, [rateLimitSeconds]);
+
+  // Debounce the URL input.
+  useEffect(() => {
+    const trimmed = url.trim();
+    const timer = setTimeout(() => setDebouncedUrl(trimmed), URL_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [url]);
+
+  /**
+   * Central error mapping: rate limits become a countdown (no auto-retry),
+   * everything else becomes a human-readable message.
+   */
+  const handleRequestError = useCallback((err: unknown, fallback: string) => {
+    if (err instanceof MediaApiError && err.isRateLimited) {
+      setRateLimitSeconds(Math.max(1, err.retryAfter ?? DEFAULT_RETRY_AFTER_SEC));
+      setError(null);
+      return;
+    }
+    if (err instanceof MediaApiError) {
+      setError(err.message || fallback);
+      return;
+    }
+    setError((err as Error)?.message || fallback);
+  }, []);
+
+  /** Runs the analysis for a URL (shared by the Analyze button and the debounce). */
+  const runAnalysis = useCallback(
+    async (targetUrl: string) => {
+      const trimmed = targetUrl.trim();
+      if (!trimmed) return;
+      setIsAnalyzing(true);
+      setError(null);
+      setAnalysis(null);
+      try {
+        const result = await analyzeMediaUrl(trimmed);
+        setAnalysis(result);
+        if (result.availableFormats.length > 0) {
+          const downloadable = result.availableFormats.find((f) => f.directDownloadUrl || result.rawSourceUrl);
+          setSelectedFormat(downloadable ? downloadable.id : result.availableFormats[0].id);
+        }
+        if (onMediaSelect) onMediaSelect(result);
+      } catch (err) {
+        handleRequestError(err, 'Failed to inspect media resource.');
+      } finally {
+        setIsAnalyzing(false);
+      }
+    },
+    [handleRequestError, onMediaSelect]
+  );
+
+  // Auto-analyze once a pasted/typed URL settles, one request per URL.
+  useEffect(() => {
+    if (!debouncedUrl || lastAnalyzedRef.current === debouncedUrl) return;
+    if (rateLimitSeconds > 0) return; // never auto-retry during a rate limit
+    lastAnalyzedRef.current = debouncedUrl;
+    void runAnalysis(debouncedUrl);
+  }, [debouncedUrl, rateLimitSeconds, runAnalysis]);
 
   const isVideoPlatformList =
     !!analysis?.tracks?.length &&
     (analysis.platform === 'youtube' || analysis.platform === 'tiktok' || analysis.mediaType === 'mixed');
+
+  /**
+   * Only tracks the platform actually lets us fetch can be selected or
+   * downloaded; the rest stay listed so the user still sees them.
+   */
+  const availableTracks = (analysis?.tracks || []).filter((t) => !t.unavailable);
+  /** Real listing size (e.g. "TRACKS (55)"), including unavailable entries. */
+  const displayedTrackCount = analysis?.totalTracks ?? analysis?.tracks?.length ?? 0;
 
   // Reset selection when a new analysis arrives
   React.useEffect(() => {
@@ -83,10 +187,19 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
     const run = async () => {
       while (idx < tracks.length && !cancelled) {
         const t = tracks[idx++];
-        const kbps = await probeStreamBitrate(t.url);
-        if (cancelled) return;
-        if (typeof kbps === 'number' && kbps > 0) {
-          setTrackBitrates((prev) => ({ ...prev, [t.url]: kbps }));
+        try {
+          const kbps = await probeStreamBitrate(t.url);
+          if (cancelled) return;
+          if (typeof kbps === 'number' && kbps > 0) {
+            setTrackBitrates((prev) => ({ ...prev, [t.url]: kbps }));
+          }
+        } catch (err) {
+          // Stop probing entirely on a rate limit — more requests would only
+          // extend the block.
+          if (err instanceof MediaApiError && err.isRateLimited) {
+            handleRequestError(err, 'Too many requests');
+            return;
+          }
         }
       }
     };
@@ -95,9 +208,11 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [analysis]);
+  }, [analysis, handleRequestError]);
 
-  const handleTogglePlay = async (track: { title: string; url: string; creator?: string }) => {
+  const handleTogglePlay = async (track: { title: string; url: string; creator?: string; unavailable?: string }) => {
+    // Unavailable entries have no resolvable stream, so playing them is a no-op.
+    if (actionsDisabled || track.unavailable) return;
     try {
       setError(null);
       setLoadingPlayUrl(track.url);
@@ -110,14 +225,15 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
         return;
       }
       playerStore.addAndPlay({ id: track.url, title: track.title, url: stream, creator: track.creator });
-    } catch (err: any) {
-      setError(`Playback failed: ${err.message || err}`);
+    } catch (err) {
+      handleRequestError(err, `Playback failed: ${(err as Error)?.message || err}`);
     } finally {
       setLoadingPlayUrl(null);
     }
   };
 
   const handleCardVideoPreview = async (track: { title: string; url: string }) => {
+    if (actionsDisabled) return;
     if (cardPreviewUrl === track.url && cardPreviewStream) {
       setCardPreviewUrl(null);
       setCardPreviewStream(null);
@@ -137,8 +253,8 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
       }
       setCardPreviewUrl(track.url);
       setCardPreviewStream(stream);
-    } catch (err: any) {
-      setError(`Preview failed: ${err.message || err}`);
+    } catch (err) {
+      handleRequestError(err, `Preview failed: ${(err as Error)?.message || err}`);
     } finally {
       setCardPreviewLoading(null);
     }
@@ -167,29 +283,15 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
 
   const handleAnalyze = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if (!url.trim()) return;
-
-    setIsAnalyzing(true);
-    setError(null);
-    setAnalysis(null);
-
-    try {
-      const result = await analyzeMediaUrl(url.trim());
-      setAnalysis(result);
-      if (result.availableFormats.length > 0) {
-        const downloadable = result.availableFormats.find(f => f.directDownloadUrl || result.rawSourceUrl);
-        setSelectedFormat(downloadable ? downloadable.id : result.availableFormats[0].id);
-      }
-      if (onMediaSelect) onMediaSelect(result);
-    } catch (err: any) {
-      setError(err.message || 'Failed to inspect media resource.');
-    } finally {
-      setIsAnalyzing(false);
-    }
+    if (!url.trim() || isRequestInFlight) return;
+    // A manual submission supersedes the debounced auto-analyze for this URL.
+    lastAnalyzedRef.current = url.trim();
+    setDebouncedUrl(url.trim());
+    await runAnalysis(url.trim());
   };
 
   const handleDownload = async (format: MediaFormatOption) => {
-    if (!analysis) return;
+    if (!analysis || actionsDisabled) return;
     setDownloadingId(format.id);
 
     try {
@@ -215,8 +317,8 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
       if (onJobStarted) {
         onJobStarted(job.jobId, job.filename);
       }
-    } catch (err: any) {
-      setError(`Download failed: ${err.message}`);
+    } catch (err) {
+      handleRequestError(err, 'Download failed. The platform did not respond — try again in a moment.');
     } finally {
       setDownloadingId(null);
     }
@@ -309,7 +411,7 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
 
           <button
             type="submit"
-            disabled={isAnalyzing || !url.trim()}
+            disabled={actionsDisabled || !url.trim()}
             className="px-6 py-3 bg-white hover:bg-neutral-200 disabled:opacity-50 disabled:cursor-not-allowed text-black text-xs font-bold uppercase tracking-wider rounded-xl transition-all shadow-lg shadow-white/20 flex items-center justify-center gap-2"
           >
             {isAnalyzing ? (
@@ -325,6 +427,21 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
             )}
           </button>
         </form>
+
+        {rateLimitSeconds > 0 && (
+          <div className="mt-4 p-4 rounded-xl bg-amber-500/10 border border-amber-400/40 text-amber-100 text-xs flex items-start gap-2.5">
+            <Timer className="w-4 h-4 shrink-0 mt-0.5" />
+            <div>
+              <p className="font-semibold text-amber-200">
+                Too many requests, try again in {rateLimitSeconds} second{rateLimitSeconds === 1 ? '' : 's'}
+              </p>
+              <p className="mt-0.5 text-amber-200/80 leading-relaxed">
+                The media platform is rate-limiting this server&rsquo;s IP address. Actions unlock automatically
+                when the countdown ends &mdash; no retry is sent in the meantime.
+              </p>
+            </div>
+          </div>
+        )}
 
         {error && (
           <div className="mt-4 p-4 rounded-xl bg-white/10 border border-white/20 text-white text-xs flex items-start gap-2.5">
@@ -418,7 +535,7 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
                   ) : (
                     <Music className="w-3.5 h-3.5 text-white" />
                   )}
-                  {isVideoPlatformList ? 'Videos' : 'Tracks'} ({analysis.tracks.length})
+                  {isVideoPlatformList ? 'Videos' : 'Tracks'} ({displayedTrackCount})
                 </h5>
                 <div className="flex flex-wrap items-center gap-2">
                   {isVideoPlatformList && (
@@ -452,31 +569,32 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
                   <button
                     onClick={() =>
                       setSelectedTracks((prev) =>
-                        prev.size === analysis.tracks!.length
+                        prev.size === availableTracks.length
                           ? new Set()
-                          : new Set(analysis.tracks!.map((t) => t.url))
+                          : new Set(availableTracks.map((t) => t.url))
                       )
                     }
                     className="text-[11px] text-neutral-400 hover:text-white transition-colors"
                   >
-                    {selectedTracks.size === analysis.tracks.length ? 'Deselect all' : 'Select all'}
+                    {selectedTracks.size === availableTracks.length ? 'Deselect all' : 'Select all'}
                   </button>
                   <button
-                    disabled={selectedTracks.size === 0 || downloadingId === 'bulk'}
+                    disabled={selectedTracks.size === 0 || downloadingId === 'bulk' || actionsDisabled}
                     onClick={async () => {
                       setDownloadingId('bulk');
                       try {
                         const type: BulkDownloadType = isVideoPlatformList ? bulkDownloadType : 'audio';
-                        for (const t of analysis.tracks!.filter((tr) => selectedTracks.has(tr.url))) {
+                        for (const t of analysis.tracks!.filter((tr) => selectedTracks.has(tr.url) && !tr.unavailable)) {
+                          if (actionsDisabled) break;
                           await downloadTrack(t, type);
                         }
-                      } catch (err: any) {
-                        setError(`Download failed: ${err.message}`);
+                      } catch (err) {
+                        handleRequestError(err, 'Download failed. The platform did not respond — try again in a moment.');
                       } finally {
                         setDownloadingId(null);
                       }
                     }}
-                    className="px-3 py-1.5 rounded-lg bg-fuchsia-500/20 hover:bg-fuchsia-500/30 border border-fuchsia-500/40 text-fuchsia-300 text-xs font-semibold transition-all disabled:opacity-50 flex items-center gap-1.5"
+                    className={`${DOWNLOAD_BTN_BASE} ${selectedTracks.size > 0 ? DOWNLOAD_BTN_ACTIVE : DOWNLOAD_BTN_IDLE}`}
                   >
                     {downloadingId === 'bulk' ? (
                       <Loader2 className="w-3 h-3 animate-spin" />
@@ -490,7 +608,7 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
               </div>
 
               {isVideoPlatformList ? (
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                <div className={`grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 ${TRACK_LIST_SCROLL_CLASS}`}>
                   {analysis.tracks.map((t) => {
                     const isPreviewOpen = cardPreviewUrl === t.url && !!cardPreviewStream;
                     // TikTok CDN thumbnails require a TikTok Referer; proxy them.
@@ -557,7 +675,7 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
                           <button
                             type="button"
                             onClick={() => handleCardVideoPreview(t)}
-                            disabled={cardPreviewLoading === t.url}
+                            disabled={actionsDisabled}
                             className="absolute bottom-2 right-2 px-2.5 py-1.5 rounded-lg bg-black/75 hover:bg-black/90 border border-white/20 text-white text-[11px] font-semibold flex items-center gap-1.5 disabled:opacity-50"
                           >
                             {cardPreviewLoading === t.url ? (
@@ -588,13 +706,13 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
                           <div className="flex items-center gap-2">
                             <button
                               type="button"
-                              disabled={downloadingId !== null}
+                              disabled={actionsDisabled}
                               onClick={async () => {
                                 setDownloadingId(`${t.url}:video`);
                                 try {
                                   await downloadTrack(t, 'video');
                                 } catch (err: any) {
-                                  setError(`Download failed: ${err.message}`);
+                                  handleRequestError(err, 'Download failed. The platform did not respond — try again in a moment.');
                                 } finally {
                                   setDownloadingId(null);
                                 }
@@ -610,13 +728,13 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
                             </button>
                             <button
                               type="button"
-                              disabled={downloadingId !== null}
+                              disabled={actionsDisabled}
                               onClick={async () => {
                                 setDownloadingId(`${t.url}:audio`);
                                 try {
                                   await downloadTrack(t, 'audio');
                                 } catch (err: any) {
-                                  setError(`Download failed: ${err.message}`);
+                                  handleRequestError(err, 'Download failed. The platform did not respond — try again in a moment.');
                                 } finally {
                                   setDownloadingId(null);
                                 }
@@ -637,7 +755,7 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
                   })}
                 </div>
               ) : (
-                <div className="divide-y divide-white/5 rounded-xl border border-white/[0.06] overflow-hidden">
+                <div className={`divide-y divide-white/5 rounded-xl border border-white/[0.06] overflow-hidden ${TRACK_LIST_SCROLL_CLASS}`}>
                   {analysis.tracks.map((t) => (
                     <div key={t.url} className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3 bg-neutral-900/40">
                       <input
@@ -651,14 +769,15 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
                             return next;
                           });
                         }}
-                        className="w-4 h-4 accent-fuchsia-400 cursor-pointer shrink-0"
-                        title="Select for download"
+                        disabled={!!t.unavailable}
+                        className="w-4 h-4 accent-fuchsia-400 cursor-pointer shrink-0 disabled:cursor-not-allowed disabled:opacity-40"
+                        title={t.unavailable || 'Select for download'}
                       />
                       <button
                         onClick={() => (currentId === t.url ? playerStore.toggle() : handleTogglePlay(t))}
-                        disabled={loadingPlayUrl === t.url}
-                        className="w-9 h-9 rounded-full bg-fuchsia-500/20 hover:bg-fuchsia-500/40 border border-fuchsia-500/40 text-fuchsia-300 flex items-center justify-center transition-all shrink-0"
-                        title={currentId === t.url && isPlaying ? 'Pause' : 'Play'}
+                        disabled={actionsDisabled || !!t.unavailable}
+                        className="w-9 h-9 rounded-full bg-fuchsia-500/20 hover:bg-fuchsia-500/40 border border-fuchsia-500/40 text-fuchsia-300 flex items-center justify-center transition-all shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
+                        title={t.unavailable || (currentId === t.url && isPlaying ? 'Pause' : 'Play')}
                       >
                         {loadingPlayUrl === t.url ? (
                           <Loader2 className="w-4 h-4 animate-spin" />
@@ -693,17 +812,20 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
                             setDownloadingId(t.url);
                             try {
                               await downloadTrack(t, 'audio');
-                            } catch (err: any) {
-                              setError(`Download failed: ${err.message}`);
+                            } catch (err) {
+                              handleRequestError(err, 'Download failed. The platform did not respond — try again in a moment.');
                             } finally {
                               setDownloadingId(null);
                             }
                           }}
-                          disabled={downloadingId !== null}
-                          className="px-3 py-1.5 rounded-lg bg-white/20 hover:bg-white/30 border border-white/30 text-white text-xs font-semibold flex items-center gap-1.5 transition-all shrink-0"
+                          disabled={actionsDisabled || !!t.unavailable}
+                          title={t.unavailable}
+                          className={`${DOWNLOAD_BTN_BASE} ${t.unavailable ? DOWNLOAD_BTN_IDLE : DOWNLOAD_BTN_ACTIVE}`}
                         >
                           <Download className="w-3 h-3" />
-                          {downloadingId === t.url ? 'Starting...' : 'Download'}
+                          {downloadingId === t.url
+                            ? 'Starting...'
+                            : t.unavailable || 'Download'}
                         </button>
                       </div>
                     </div>
@@ -782,7 +904,7 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
                           e.preventDefault();
                           handleDownload(fmt);
                         }}
-                        disabled={downloadingId !== null}
+                        disabled={actionsDisabled}
                         className="px-3 py-1.5 rounded-lg bg-white/20 hover:bg-white/30 border border-white/30 text-white text-xs font-semibold flex items-center gap-1.5 transition-all"
                       >
                         <Download className="w-3 h-3" />
@@ -802,7 +924,7 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
                 <span className="text-xs text-neutral-400">Video Preview:</span>
                 <button
                   type="button"
-                  disabled={previewLoading}
+                  disabled={actionsDisabled}
                   onClick={async () => {
                     try {
                       setError(null);
@@ -817,8 +939,11 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
                         return;
                       }
                       setPreviewVideoUrl(stream);
-                    } catch (err: any) {
-                      setError(`Preview failed: ${err.message}`);
+                    } catch (err) {
+                      handleRequestError(
+                        err,
+                        'Preview unavailable — the platform did not expose a playable stream. Try analyzing the link again.'
+                      );
                     } finally {
                       setPreviewLoading(false);
                     }
@@ -859,7 +984,7 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
                         analysis.availableFormats[0];
                       if (audioFmt) handleDownload(audioFmt);
                     }}
-                    disabled={downloadingId !== null}
+                    disabled={actionsDisabled}
                     className="px-3.5 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-medium text-neutral-200 transition-all flex items-center gap-1.5"
                   >
                     <Download className="w-3.5 h-3.5 text-white" />
@@ -888,7 +1013,7 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
                       onClick={() =>
                         onDirectDownload({ ...fmt, directDownloadUrl: directUrl })
                       }
-                      disabled={downloadingId !== null}
+                      disabled={actionsDisabled}
                       className="px-3.5 py-1.5 rounded-xl bg-white/20 hover:bg-white/30 border border-white/30 text-white text-xs font-bold transition-all flex items-center gap-1.5"
                     >
                       <Download className="w-3.5 h-3.5" />

@@ -1,4 +1,41 @@
-import type { IMediaProvider, MediaAnalysisResult, MediaFormatOption } from './MediaProvider.js';
+import type { IMediaProvider, MediaAnalysisResult, MediaFormatOption, MediaTrackInfo } from './MediaProvider.js';
+import { fetchWithRetry } from '../../utils/httpFetch.js';
+import { RateLimitedError } from '../../utils/errors.js';
+
+/** SoundCloud's `tracks?ids=` endpoint accepts up to 200 ids; 50 keeps the
+ *  response comfortably small and under the URL length limits. */
+const TRACK_ID_BATCH_SIZE = 50;
+
+/** SoundCloud API clients bundle these params with every v2 call. */
+function apiParams(clientId: string, extra = ''): string {
+  return `client_id=${clientId}&app_version=1751368616&app_locale=en${extra ? `&${extra}` : ''}`;
+}
+
+/**
+ * Short reason a listed track cannot be fetched, or `undefined` when it is
+ * publicly accessible. No attempt is made to bypass a restriction.
+ */
+function trackUnavailability(t: any): string | undefined {
+  if (!t) return 'Unavailable';
+  const policy = String(t.policy || '').toUpperCase();
+  if (policy === 'BLOCK' || t.streamable === false) return 'Restricted';
+  if (t.policy === 'SNIP') return 'Preview only';
+  return undefined;
+}
+
+function toTrackInfo(t: any): MediaTrackInfo {
+  const durationSec = typeof t.duration === 'number' ? Math.round(t.duration / 1000) : undefined;
+  return {
+    title: t.title,
+    url: t.permalink_url,
+    creator: t.user?.username,
+    duration: durationSec,
+    thumbnail: t.artwork_url || undefined,
+    mediaType: 'audio',
+    id: typeof t.id === 'number' ? t.id : undefined,
+    unavailable: trackUnavailability(t),
+  };
+}
 
 export class SoundCloudProvider implements IMediaProvider {
   public id = 'soundcloud';
@@ -294,18 +331,26 @@ export class SoundCloudProvider implements IMediaProvider {
     let title = 'SoundCloud Playlist';
     let author = 'Unknown Artist';
     let thumbnail = '';
-    const tracks: { title: string; url: string; creator?: string; duration?: number; thumbnail?: string }[] = [];
+    const tracks: MediaTrackInfo[] = [];
+    /** Playlist position → resolved metadata, merged back in order further down. */
+    const slots: Array<{ id?: number; info?: MediaTrackInfo }> = [];
+    let totalTracks = 0;
 
     try {
-      const pageRes = await fetch(url, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          'Accept-Language': 'en-US,en;q=0.9',
+      // 1. Playlist page HTML → public API client_id (same auth flow used elsewhere)
+      const pageRes = await fetchWithRetry(
+        url,
+        {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+          },
+          redirect: 'follow',
+          signal: AbortSignal.timeout(10000),
         },
-        redirect: 'follow',
-        signal: AbortSignal.timeout(10000),
-      });
+        'SoundCloud playlist page'
+      );
 
       let clientId: string | undefined;
       if (pageRes.ok) {
@@ -335,14 +380,21 @@ export class SoundCloudProvider implements IMediaProvider {
             'SoundCloud streams are protected by artist copyright. Only download tracks you own or that the artist has made publicly accessible.',
           availableFormats: [],
           tracks,
+          totalTracks: 0,
         };
       }
 
-      const resolveUrl = `https://api-v2.soundcloud.com/resolve?url=${encodeURIComponent(url)}&client_id=${clientId}`;
-      const apiRes = await fetch(resolveUrl, {
-        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
-        signal: AbortSignal.timeout(10000),
-      });
+      // 2. Resolve the playlist. SoundCloud only hydrates full metadata for the
+      //    first handful of entries; the rest arrive as id-only stubs.
+      const resolveUrl = `https://api-v2.soundcloud.com/resolve?url=${encodeURIComponent(url)}&${apiParams(clientId)}`;
+      const apiRes = await fetchWithRetry(
+        resolveUrl,
+        {
+          headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+          signal: AbortSignal.timeout(10000),
+        },
+        'SoundCloud playlist resolve'
+      );
 
       if (apiRes.ok) {
         const playlist = (await apiRes.json()) as any;
@@ -350,87 +402,100 @@ export class SoundCloudProvider implements IMediaProvider {
         if (playlist.user?.username) author = playlist.user.username;
         if (playlist.artwork_url) thumbnail = playlist.artwork_url;
 
-        const tracksFromResolve: { title: string; url: string; creator?: string; duration?: number; thumbnail?: string }[] = [];
-        const playlistTracks = Array.isArray(playlist.tracks) ? playlist.tracks : [];
-        for (const t of playlistTracks) {
-          if (t?.permalink_url && t?.title) {
-            tracksFromResolve.push({
-              title: t.title,
-              url: t.permalink_url,
-              creator: t.user?.username,
-              duration: typeof t.duration === 'number' ? Math.round(t.duration / 1000) : undefined,
-              thumbnail: t.artwork_url || undefined,
-            });
+        const entries: any[] = Array.isArray(playlist.tracks) ? playlist.tracks : [];
+        totalTracks = entries.length;
+
+        // Record every entry at its playlist position, hydrating in place.
+        const stubIds: number[] = [];
+        for (const entry of entries) {
+          const id = typeof entry?.id === 'number' ? entry.id : undefined;
+          const slot: { id?: number; info?: MediaTrackInfo } = { id };
+
+          if (entry?.permalink_url && entry?.title) {
+            slot.info = toTrackInfo(entry);
+          } else if (id !== undefined) {
+            stubIds.push(id);
+          } else if (entry?.permalink_url) {
+            // Usable URL but no title — keep it, marked as metadata-limited.
+            slot.info = {
+              title: 'Unknown track',
+              url: entry.permalink_url,
+              mediaType: 'audio',
+              unavailable: 'Metadata unavailable',
+            };
+          }
+          slots.push(slot);
+        }
+
+        // 3. Fetch full metadata for the stubs in batches via tracks?ids=.
+        if (stubIds.length > 0 && clientId) {
+          const resolvedById = new Map<number, MediaTrackInfo>();
+          for (let i = 0; i < stubIds.length; i += TRACK_ID_BATCH_SIZE) {
+            const batch = stubIds.slice(i, i + TRACK_ID_BATCH_SIZE);
+            const batchRes = await fetchWithRetry(
+              `https://api-v2.soundcloud.com/tracks?ids=${batch.join(',')}&${apiParams(clientId)}`,
+              {
+                headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+                signal: AbortSignal.timeout(10000),
+              },
+              'SoundCloud batch track metadata'
+            );
+            if (!batchRes.ok) break;
+            const batchTracks = (await batchRes.json()) as any;
+            if (Array.isArray(batchTracks)) {
+              for (const t of batchTracks) {
+                if (t?.id !== undefined && t?.permalink_url && t?.title) {
+                  resolvedById.set(t.id, toTrackInfo(t));
+                }
+              }
+            }
+          }
+
+          // Merge back into the original playlist order.
+          for (const slot of slots) {
+            if (slot.info || slot.id === undefined) continue;
+            const resolved = resolvedById.get(slot.id);
+            if (resolved) {
+              slot.info = resolved;
+            } else {
+              // Still a stub: private, removed or geo-restricted. It stays listed
+              // (the user asked for all tracks) but its actions are disabled.
+              slot.info = {
+                title: 'Unavailable track',
+                url: `soundcloud:track:${slot.id}`,
+                id: slot.id,
+                mediaType: 'audio',
+                unavailable: 'Private or region-blocked',
+              };
+            }
           }
         }
-        tracks.push(...tracksFromResolve);
 
-        const playlistId = playlist.id;
-        if (typeof playlistId === 'number') {
-          const baseParams = `client_id=${clientId}&limit=200&linked_partitioning=1&app_version=1751368616&app_locale=en`;
-          const pageUrl = `https://api-v2.soundcloud.com/playlists/${playlistId}/tracks?${baseParams}`;
-          let next: string | undefined = pageUrl;
-          const seen = new Set<string>(tracksFromResolve.map((t) => t.url));
-          let pages = 0;
-          while (next && pages < 20) {
-            pages++;
-            const pageRes = await fetch(next, {
-              headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
-              signal: AbortSignal.timeout(10000),
-            });
-            if (!pageRes.ok) {
-              break;
-            }
-            const pageJson = (await pageRes.json()) as any;
-            const coll: any[] = Array.isArray(pageJson.collection)
-              ? pageJson.collection
-              : Array.isArray(pageJson)
-                ? pageJson
-                : [];
-            for (const t of coll) {
-              if (t?.permalink_url && t?.title && !seen.has(t.permalink_url)) {
-                seen.add(t.permalink_url);
-                tracks.push({
-                  title: t.title,
-                  url: t.permalink_url,
-                  creator: t.user?.username,
-                  duration: typeof t.duration === 'number' ? Math.round(t.duration / 1000) : undefined,
-                  thumbnail: t.artwork_url || undefined,
-                });
-              }
-            }
-            const rawNext = pageJson.next_href || pageJson.next || undefined;
-            if (typeof rawNext === 'string' && rawNext.length > 0) {
-              if (!rawNext.includes('client_id=')) {
-                const separator = rawNext.includes('?') ? '&' : '?';
-                next = `${rawNext}${separator}${baseParams}`;
-              } else {
-                next = rawNext;
-              }
-              if (next.startsWith('/')) {
-                next = `https://api-v2.soundcloud.com${next}`;
-              }
-            } else {
-              next = undefined;
-            }
-          }
+        for (const slot of slots) {
+          if (slot.info) tracks.push(slot.info);
         }
       }
-    } catch {
-      // fetch failed
+    } catch (err) {
+      // A platform 429 must reach the API layer as 429 + Retry-After, not be
+      // flattened into "playlist is empty".
+      if (err instanceof RateLimitedError) throw err;
     }
 
     if (tracks.length === 0) {
       try {
-        const pageRes2 = await fetch(url, {
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
+        const pageRes2 = await fetchWithRetry(
+          url,
+          {
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+              Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+              'Accept-Language': 'en-US,en;q=0.9',
+            },
+            redirect: 'follow',
+            signal: AbortSignal.timeout(10000),
           },
-          redirect: 'follow',
-          signal: AbortSignal.timeout(10000),
-        });
+          'SoundCloud playlist page (fallback)'
+        );
         if (pageRes2.ok) {
           const html = await pageRes2.text();
           const seen = new Set<string>(tracks.map((t) => t.url));
@@ -449,6 +514,9 @@ export class SoundCloudProvider implements IMediaProvider {
                 creator: node.user?.username,
                 duration: typeof node.duration === 'number' ? Math.round(node.duration / 1000) : undefined,
                 thumbnail: node.artwork_url || undefined,
+                mediaType: 'audio',
+                id: typeof node.id === 'number' ? node.id : undefined,
+                unavailable: trackUnavailability(node),
               });
             }
             Object.values(node).forEach(extractFromNode);
@@ -477,6 +545,9 @@ export class SoundCloudProvider implements IMediaProvider {
                     creator: node.user?.username,
                     duration: typeof node.duration === 'number' ? Math.round(node.duration / 1000) : undefined,
                     thumbnail: node.artwork_url || undefined,
+                    mediaType: 'audio',
+                    id: typeof node.id === 'number' ? node.id : undefined,
+                    unavailable: trackUnavailability(node),
                   });
                 }
               } catch {
@@ -518,6 +589,8 @@ export class SoundCloudProvider implements IMediaProvider {
         'SoundCloud streams are protected by artist copyright. Only download tracks you own or that the artist has made publicly accessible.',
       availableFormats: [],
       tracks,
+      // Fall back to what was actually listed when no API count was obtained.
+      totalTracks: totalTracks || tracks.length,
     };
   }
 

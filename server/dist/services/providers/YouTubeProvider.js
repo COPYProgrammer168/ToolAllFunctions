@@ -61,8 +61,8 @@ export class YouTubeProvider {
         /** Per-client status collected for the diagnostic message. */
         const clientNotes = [];
         try {
-            // 429 is retried with back-off; if it persists the helper throws a
-            // RateLimitedError so the API answers 503 instead of blaming the video.
+            // 429 is never retried here: the helper throws RateLimitedError so the
+            // API answers 429 + Retry-After instead of blaming the video.
             const pageRes = await fetchWithRetry(url, {
                 headers: {
                     'User-Agent': UA,
@@ -190,7 +190,7 @@ export class YouTubeProvider {
         }
         catch (err) {
             // Page / Innertube resolution failed. A rate-limited IP must reach the
-            // API layer as 503 rather than as "video cannot be downloaded".
+            // API layer as 429 rather than as "video cannot be downloaded".
             if (err instanceof RateLimitedError)
                 throw err;
             failureReason = `Innertube resolution failed: ${err.message}`;
@@ -396,7 +396,9 @@ export class YouTubeProvider {
         try {
             // Prefer the Videos tab so the first payload already lists uploads
             const videosUrl = this.toChannelVideosUrl(url);
-            const pageRes = await fetch(videosUrl, {
+            // 429 is reported as RateLimitedError (→ HTTP 429 + Retry-After); it must
+            // not be swallowed here or a rate-limited IP would look like an empty channel.
+            const pageRes = await fetchWithRetry(videosUrl, {
                 headers: {
                     'User-Agent': UA,
                     Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -404,7 +406,7 @@ export class YouTubeProvider {
                 },
                 redirect: 'follow',
                 signal: AbortSignal.timeout(12000),
-            });
+            }, 'YouTube channel page');
             if (!pageRes.ok) {
                 return this.emptyChannelResult(url, title, author, thumbnail, tracks, 'Could not open the channel page.');
             }
@@ -468,6 +470,10 @@ export class YouTubeProvider {
             }
         }
         catch (err) {
+            // A rate-limited platform must reach the API layer as 429, not as an
+            // empty channel listing.
+            if (err instanceof RateLimitedError)
+                throw err;
             console.error('YouTube channel analyze failed:', err);
         }
         const limited = tracks.slice(0, MAX_CHANNEL_VIDEOS);
@@ -529,7 +535,7 @@ export class YouTubeProvider {
     async browseChannelVideos(apiKey, channelId) {
         const tracks = [];
         try {
-            const res = await fetch(`https://www.youtube.com/youtubei/v1/browse?key=${apiKey}`, {
+            const res = await fetchWithRetry(`https://www.youtube.com/youtubei/v1/browse?key=${apiKey}`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -543,21 +549,23 @@ export class YouTubeProvider {
                     params: CHANNEL_VIDEOS_PARAMS,
                 }),
                 signal: AbortSignal.timeout(12000),
-            });
+            }, 'YouTube channel videos browse');
             if (!res.ok)
                 return { tracks };
             const data = (await res.json());
             this.collectVideosFromBrowse(data, tracks);
             return { tracks, continuation: this.findContinuationToken(data) };
         }
-        catch {
+        catch (err) {
+            if (err instanceof RateLimitedError)
+                throw err;
             return { tracks };
         }
     }
     async browseChannelContinuation(apiKey, continuation) {
         const tracks = [];
         try {
-            const res = await fetch(`https://www.youtube.com/youtubei/v1/browse?key=${apiKey}`, {
+            const res = await fetchWithRetry(`https://www.youtube.com/youtubei/v1/browse?key=${apiKey}`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -570,14 +578,16 @@ export class YouTubeProvider {
                     continuation,
                 }),
                 signal: AbortSignal.timeout(12000),
-            });
+            }, 'YouTube channel continuation browse');
             if (!res.ok)
                 return { tracks };
             const data = (await res.json());
             this.collectVideosFromBrowse(data, tracks);
             return { tracks, continuation: this.findContinuationToken(data) };
         }
-        catch {
+        catch (err) {
+            if (err instanceof RateLimitedError)
+                throw err;
             return { tracks };
         }
     }

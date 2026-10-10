@@ -73,8 +73,8 @@ export class YouTubeProvider implements IMediaProvider {
     const clientNotes: string[] = [];
 
     try {
-      // 429 is retried with back-off; if it persists the helper throws a
-      // RateLimitedError so the API answers 503 instead of blaming the video.
+      // 429 is never retried here: the helper throws RateLimitedError so the
+      // API answers 429 + Retry-After instead of blaming the video.
       const pageRes = await fetchWithRetry(
         url,
         {
@@ -212,7 +212,7 @@ export class YouTubeProvider implements IMediaProvider {
       }
     } catch (err) {
       // Page / Innertube resolution failed. A rate-limited IP must reach the
-      // API layer as 503 rather than as "video cannot be downloaded".
+      // API layer as 429 rather than as "video cannot be downloaded".
       if (err instanceof RateLimitedError) throw err;
       failureReason = `Innertube resolution failed: ${(err as Error).message}`;
     }
@@ -439,15 +439,21 @@ export class YouTubeProvider implements IMediaProvider {
     try {
       // Prefer the Videos tab so the first payload already lists uploads
       const videosUrl = this.toChannelVideosUrl(url);
-      const pageRes = await fetch(videosUrl, {
-        headers: {
-          'User-Agent': UA,
-          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          'Accept-Language': 'en-US,en;q=0.9',
+      // 429 is reported as RateLimitedError (→ HTTP 429 + Retry-After); it must
+      // not be swallowed here or a rate-limited IP would look like an empty channel.
+      const pageRes = await fetchWithRetry(
+        videosUrl,
+        {
+          headers: {
+            'User-Agent': UA,
+            Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+          },
+          redirect: 'follow',
+          signal: AbortSignal.timeout(12000),
         },
-        redirect: 'follow',
-        signal: AbortSignal.timeout(12000),
-      });
+        'YouTube channel page'
+      );
 
       if (!pageRes.ok) {
         return this.emptyChannelResult(url, title, author, thumbnail, tracks, 'Could not open the channel page.');
@@ -512,6 +518,9 @@ export class YouTubeProvider implements IMediaProvider {
         }
       }
     } catch (err) {
+      // A rate-limited platform must reach the API layer as 429, not as an
+      // empty channel listing.
+      if (err instanceof RateLimitedError) throw err;
       console.error('YouTube channel analyze failed:', err);
     }
 
@@ -590,26 +599,31 @@ export class YouTubeProvider implements IMediaProvider {
   ): Promise<{ tracks: MediaTrackInfo[]; continuation?: string }> {
     const tracks: MediaTrackInfo[] = [];
     try {
-      const res = await fetch(`https://www.youtube.com/youtubei/v1/browse?key=${apiKey}`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'User-Agent': UA,
-        },
-        body: JSON.stringify({
-          context: {
-            client: { clientName: 'WEB', clientVersion: '2.20240726.01.00' },
+      const res = await fetchWithRetry(
+        `https://www.youtube.com/youtubei/v1/browse?key=${apiKey}`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'User-Agent': UA,
           },
-          browseId: channelId,
-          params: CHANNEL_VIDEOS_PARAMS,
-        }),
-        signal: AbortSignal.timeout(12000),
-      });
+          body: JSON.stringify({
+            context: {
+              client: { clientName: 'WEB', clientVersion: '2.20240726.01.00' },
+            },
+            browseId: channelId,
+            params: CHANNEL_VIDEOS_PARAMS,
+          }),
+          signal: AbortSignal.timeout(12000),
+        },
+        'YouTube channel videos browse'
+      );
       if (!res.ok) return { tracks };
       const data = (await res.json()) as any;
       this.collectVideosFromBrowse(data, tracks);
       return { tracks, continuation: this.findContinuationToken(data) };
-    } catch {
+    } catch (err) {
+      if (err instanceof RateLimitedError) throw err;
       return { tracks };
     }
   }
@@ -620,25 +634,30 @@ export class YouTubeProvider implements IMediaProvider {
   ): Promise<{ tracks: MediaTrackInfo[]; continuation?: string }> {
     const tracks: MediaTrackInfo[] = [];
     try {
-      const res = await fetch(`https://www.youtube.com/youtubei/v1/browse?key=${apiKey}`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'User-Agent': UA,
-        },
-        body: JSON.stringify({
-          context: {
-            client: { clientName: 'WEB', clientVersion: '2.20240726.01.00' },
+      const res = await fetchWithRetry(
+        `https://www.youtube.com/youtubei/v1/browse?key=${apiKey}`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'User-Agent': UA,
           },
-          continuation,
-        }),
-        signal: AbortSignal.timeout(12000),
-      });
+          body: JSON.stringify({
+            context: {
+              client: { clientName: 'WEB', clientVersion: '2.20240726.01.00' },
+            },
+            continuation,
+          }),
+          signal: AbortSignal.timeout(12000),
+        },
+        'YouTube channel continuation browse'
+      );
       if (!res.ok) return { tracks };
       const data = (await res.json()) as any;
       this.collectVideosFromBrowse(data, tracks);
       return { tracks, continuation: this.findContinuationToken(data) };
-    } catch {
+    } catch (err) {
+      if (err instanceof RateLimitedError) throw err;
       return { tracks };
     }
   }

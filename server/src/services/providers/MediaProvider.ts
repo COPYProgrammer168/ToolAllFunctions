@@ -20,6 +20,13 @@ export interface MediaTrackInfo {
   thumbnail?: string;
   /** Hint for list UIs (video channels vs audio playlists) */
   mediaType?: 'video' | 'audio';
+  /** Platform track id — lets callers batch-resolve stubs later. */
+  id?: number;
+  /**
+   * Set when the track is listed but cannot be fetched (private, region-blocked,
+   * rights-restricted). The entry stays in the list; only actions are disabled.
+   */
+  unavailable?: string;
 }
 
 /** @deprecated Use MediaTrackInfo */
@@ -53,6 +60,9 @@ export interface MediaAnalysisResult {
   rawAudioUrl?: string;
   copyrightNotice?: string;
   tracks?: MediaTrackInfo[];
+  /** Full size of a channel/playlist listing, even when some tracks are
+   *  unavailable. Lets the UI show the real count (e.g. "TRACKS (55)"). */
+  totalTracks?: number;
 }
 
 export interface IMediaProvider {

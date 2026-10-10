@@ -18,6 +18,8 @@ import { OutroDetector } from '../services/OutroDetector.js';
 import { WatermarkEditor } from '../services/WatermarkEditor.js';
 import { ImageProcessor } from '../services/ImageProcessor.js';
 import { sanitizeFilename } from '../utils/security.js';
+import { DEFAULT_RATE_LIMIT_RETRY_AFTER_SEC } from '../utils/errors.js';
+import { rateLimit } from '../utils/rateLimiter.js';
 import { downloadToFile } from '../utils/httpDownload.js';
 import { buildStreamHeaders, getStreamCredentials } from '../services/StreamCredentials.js';
 import { ffprobeBin, ffmpegBin } from '../utils/binaries.js';
@@ -54,11 +56,23 @@ const upload = multer({
 export const apiRouter = Router();
 /**
  * Translate an error into an API response. Errors that carry an HTTP status
- * (e.g. `RateLimitedError` → 503) keep it; everything else is a 400.
+ * (e.g. `RateLimitedError` → 429) keep it; everything else is a 400.
  * `technicalDetails` (a stack trace) is only included outside production.
  */
 function respondApiError(res, err, fallbackStatus = 400) {
     const status = Number.isInteger(err?.status) ? err.status : fallbackStatus;
+    // A platform-side rate limit is surfaced as its own machine-readable shape so
+    // the client can render a countdown instead of a generic failure message.
+    if (err?.code === 'rate_limited' || status === 429) {
+        const retryAfterSec = Number(err?.retryAfterSec) || DEFAULT_RATE_LIMIT_RETRY_AFTER_SEC;
+        res.setHeader('Retry-After', String(retryAfterSec));
+        res.status(429).json({
+            error: 'rate_limited',
+            message: err?.message || 'The media platform is rate-limiting this server. Please try again shortly.',
+            retry_after: retryAfterSec,
+        });
+        return;
+    }
     const body = {
         error: err?.message || 'Request failed.',
     };
@@ -67,6 +81,14 @@ function respondApiError(res, err, fallbackStatus = 400) {
     if (process.env.NODE_ENV !== 'production' && err?.stack)
         body.technicalDetails = err.stack;
     res.status(status).json(body);
+}
+/** Client IP for logging/rate-limiting, honouring the Render proxy header. */
+function clientIp(req) {
+    const forwarded = req.headers['x-forwarded-for'];
+    if (typeof forwarded === 'string' && forwarded.length > 0) {
+        return forwarded.split(',')[0].trim();
+    }
+    return req.socket?.remoteAddress || 'unknown';
 }
 // 1. Hardware status
 apiRouter.get('/system/hardware', async (_req, res) => {
@@ -268,7 +290,15 @@ apiRouter.delete('/jobs/:id', async (req, res) => {
 // MEDIA TOOLKIT MODULE ENDPOINTS
 // ============================================================================
 // A. Universal URL Media Analyzer
-apiRouter.post('/media/analyze', async (req, res) => {
+// Analysis is expensive upstream (one click = a watch-page fetch plus Innertube
+// player calls), so it is capped per IP. When the platform itself rate-limits
+// us the resolver throws RateLimitedError, which answers 429 + Retry-After.
+const mediaAnalyzeRateLimit = rateLimit({
+    windowMs: 60_000,
+    max: Number(process.env.MEDIA_ANALYZE_RATE_LIMIT) || 10,
+    label: 'media/analyze',
+});
+apiRouter.post('/media/analyze', mediaAnalyzeRateLimit, async (req, res) => {
     try {
         const { url } = req.body;
         if (!url) {
@@ -278,8 +308,13 @@ apiRouter.post('/media/analyze', async (req, res) => {
         res.json(result);
     }
     catch (err) {
-        console.error('Media analyze error:', err?.message || err);
-        // 503 for a rate-limited platform, 400 for anything else (bad URL, DRM…).
+        if (err?.code === 'rate_limited' || err?.status === 429) {
+            console.warn(`[media/analyze] platform rate-limited (ip ${clientIp(req)}): ${err?.message || err}`);
+        }
+        else {
+            console.error('Media analyze error:', err?.message || err);
+        }
+        // 429 when the platform is rate-limiting us, 400 for anything else (bad URL, DRM…).
         respondApiError(res, err, 400);
     }
 });
@@ -402,7 +437,11 @@ apiRouter.post('/media/probe-bitrate', async (req, res) => {
         res.json({ bitrateKbps: Math.round(bitRate / 1000) });
     }
     catch (err) {
-        res.status(400).json({ error: err.message || 'Probe failed.' });
+        if (err?.code === 'rate_limited' || err?.status === 429) {
+            console.warn(`[media/probe-bitrate] platform rate-limited (ip ${clientIp(req)}): ${err?.message || err}`);
+        }
+        // Keeps the 429 + Retry-After shape instead of flattening it to 400.
+        respondApiError(res, err, 400);
     }
 });
 // B. Start Media Download / Conversion Job
@@ -448,8 +487,13 @@ apiRouter.post('/media/download', async (req, res) => {
                 }
             }
             catch (err) {
-                console.error('Media resolve error:', err?.message || err);
-                // 503 when the platform is rate-limiting us, 400 otherwise.
+                if (err?.code === 'rate_limited' || err?.status === 429) {
+                    console.warn(`[media/download] platform rate-limited (ip ${clientIp(req)}): ${err?.message || err}`);
+                }
+                else {
+                    console.error('Media resolve error:', err?.message || err);
+                }
+                // 429 when the platform is rate-limiting us, 400 otherwise.
                 return respondApiError(res, err, 400);
             }
         }
