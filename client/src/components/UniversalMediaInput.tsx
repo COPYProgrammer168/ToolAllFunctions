@@ -18,15 +18,13 @@ import {
   X,
 } from 'lucide-react';
 import type { MediaAnalysisResult, MediaFormatOption } from '../types';
-import { analyzeMediaUrl, startMediaDownload, probeStreamBitrate, MediaApiError } from '../services/api';
+import { analyzeMediaUrl, startMediaDownload, probeStreamBitrate, MediaApiError, peekCachedAnalysis } from '../services/api';
 import { playerStore, usePlayer } from '../services/player';
 
 /** How long to wait after typing stops before auto-analyzing a pasted URL. */
 const URL_DEBOUNCE_MS = 600;
 /** Fallback wait time when the server gives no `retry_after`. */
 const DEFAULT_RETRY_AFTER_SEC = 60;
-/** Long track lists scroll inside the card instead of stretching the page. */
-const TRACK_LIST_SCROLL_CLASS = 'max-h-[30rem] overflow-y-auto overscroll-contain';
 /** Green download-button styling, shared by the bulk action and per-track buttons. */
 const DOWNLOAD_BTN_BASE =
   'px-3 py-1.5 rounded-lg border text-xs font-semibold flex items-center justify-center gap-1.5 transition-all duration-200 shrink-0';
@@ -126,6 +124,19 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
     async (targetUrl: string) => {
       const trimmed = targetUrl.trim();
       if (!trimmed) return;
+
+      // Known link: render instantly, never touch the API (and never the rate limit).
+      const cached = peekCachedAnalysis(trimmed);
+      if (cached) {
+        setAnalysis(cached);
+        if (cached.availableFormats.length > 0) {
+          const downloadable = cached.availableFormats.find((f) => f.directDownloadUrl || cached.rawSourceUrl);
+          setSelectedFormat(downloadable ? downloadable.id : cached.availableFormats[0].id);
+        }
+        if (onMediaSelect) onMediaSelect(cached);
+        return;
+      }
+
       setIsAnalyzing(true);
       setError(null);
       setAnalysis(null);
@@ -146,13 +157,18 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
     [handleRequestError, onMediaSelect]
   );
 
-  // Auto-analyze once a pasted/typed URL settles, one request per URL.
+  // Auto-analyze once the user stops changing the URL — and only once per link.
+  // `url` is the live input, `debouncedUrl` the value 600ms later; when the two
+  // still differ the user is typing, so an intermediate string like
+  // "https://soundcloud.com/mss" must never reach the API.
   useEffect(() => {
-    if (!debouncedUrl || lastAnalyzedRef.current === debouncedUrl) return;
+    if (!debouncedUrl) return;
+    if (debouncedUrl !== url.trim()) return;
+    if (lastAnalyzedRef.current === debouncedUrl) return;
     if (rateLimitSeconds > 0) return; // never auto-retry during a rate limit
     lastAnalyzedRef.current = debouncedUrl;
     void runAnalysis(debouncedUrl);
-  }, [debouncedUrl, rateLimitSeconds, runAnalysis]);
+  }, [debouncedUrl, url, rateLimitSeconds, runAnalysis]);
 
   const isVideoPlatformList =
     !!analysis?.tracks?.length &&
@@ -176,35 +192,31 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
     );
   }, [analysis]);
 
-  // Lazily probe each listed track's real source bitrate (SoundCloud audio lists)
+  // Lazily probe each listed track's real source bitrate (SoundCloud audio lists).
+  // Skipped for multi-track listings: probing every track means one full
+  // server-side resolve (page fetch + player calls) per track, which is what
+  // gets the server IP rate-limited by the platform. The badge is cosmetic and
+  // falls back to a neutral value, so single tracks keep their exact bitrate.
   React.useEffect(() => {
     if (!analysis?.tracks?.length) return;
+    if (analysis.tracks.length > 1) return;
     if (analysis.platform !== 'soundcloud' && analysis.mediaType !== 'audio') return;
     let cancelled = false;
-    const tracks = analysis.tracks;
-    const concurrency = 3;
-    let idx = 0;
+    const t = analysis.tracks[0];
     const run = async () => {
-      while (idx < tracks.length && !cancelled) {
-        const t = tracks[idx++];
-        try {
-          const kbps = await probeStreamBitrate(t.url);
-          if (cancelled) return;
-          if (typeof kbps === 'number' && kbps > 0) {
-            setTrackBitrates((prev) => ({ ...prev, [t.url]: kbps }));
-          }
-        } catch (err) {
-          // Stop probing entirely on a rate limit — more requests would only
-          // extend the block.
-          if (err instanceof MediaApiError && err.isRateLimited) {
-            handleRequestError(err, 'Too many requests');
-            return;
-          }
+      try {
+        const kbps = await probeStreamBitrate(t.url);
+        if (cancelled) return;
+        if (typeof kbps === 'number' && kbps > 0) {
+          setTrackBitrates((prev) => ({ ...prev, [t.url]: kbps }));
+        }
+      } catch (err) {
+        if (err instanceof MediaApiError && err.isRateLimited) {
+          handleRequestError(err, 'Too many requests');
         }
       }
     };
-    const workers = Array.from({ length: Math.min(concurrency, tracks.length) }, run);
-    Promise.all(workers);
+    void run();
     return () => {
       cancelled = true;
     };
@@ -608,7 +620,7 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
               </div>
 
               {isVideoPlatformList ? (
-                <div className={`grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 ${TRACK_LIST_SCROLL_CLASS}`}>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
                   {analysis.tracks.map((t) => {
                     const isPreviewOpen = cardPreviewUrl === t.url && !!cardPreviewStream;
                     // TikTok CDN thumbnails require a TikTok Referer; proxy them.
@@ -644,6 +656,7 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
                             <img
                               src={thumbnailSrc}
                               alt=""
+                              loading="lazy"
                               className="absolute inset-0 w-full h-full object-cover"
                               onError={(e) => {
                                 (e.target as HTMLElement).style.display = 'none';
@@ -755,7 +768,7 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
                   })}
                 </div>
               ) : (
-                <div className={`divide-y divide-white/5 rounded-xl border border-white/[0.06] overflow-hidden ${TRACK_LIST_SCROLL_CLASS}`}>
+                <div className="divide-y divide-white/5 rounded-xl border border-white/[0.06] overflow-hidden">
                   {analysis.tracks.map((t) => (
                     <div key={t.url} className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3 bg-neutral-900/40">
                       <input
@@ -789,7 +802,12 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
                       </button>
                       <div className="flex items-center gap-3 min-w-0 flex-1">
                         {t.thumbnail ? (
-                          <img src={t.thumbnail} alt="" className="w-9 h-9 rounded-lg object-cover border border-white/10" />
+                          <img
+                            src={t.thumbnail}
+                            alt=""
+                            loading="lazy"
+                            className="w-9 h-9 rounded-lg object-cover border border-white/10"
+                          />
                         ) : (
                           <div className="w-9 h-9 rounded-lg bg-white/5 border border-white/10 flex items-center justify-center">
                             <Music className="w-4 h-4 text-neutral-500" />

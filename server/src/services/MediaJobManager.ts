@@ -1,6 +1,6 @@
 import path from 'node:path';
 import fs from 'node:fs/promises';
-import { createWriteStream, existsSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { Response } from 'express';
 import { nanoid } from 'nanoid';
@@ -9,6 +9,7 @@ import { sanitizeFilename } from '../utils/security.js';
 import { STORAGE_ROOT } from '../utils/paths.js';
 import { loadJobs, saveJob, deleteJobRow } from './JobDatabase.js';
 import { buildStreamHeaders } from './StreamCredentials.js';
+import { streamDownloadToFile } from '../utils/streamRange.js';
 
 const BASE_MEDIA_DIR = path.join(STORAGE_ROOT, 'media-tools');
 
@@ -240,7 +241,13 @@ export class MediaJobManager {
   }
 
   /**
-   * Resumable streaming download worker supporting HTTP Range requests
+   * Resumable streaming download worker supporting HTTP Range requests.
+   *
+   * YouTube's `googlevideo` CDN refuses an open-ended `Range: bytes=0-` (and any
+   * window wider than ~2 MB on audio-only streams) with 403, so the worker pulls
+   * the file in bounded chunks — see `streamDownloadToFile`. That is also what
+   * makes resuming from a partial file work: each request resumes exactly at the
+   * last byte already on disk.
    */
   public static async startResumableDownload(jobId: string, remoteUrl: string): Promise<string> {
     const job = this.jobs.get(jobId);
@@ -262,92 +269,56 @@ export class MediaJobManager {
 
     const reqHeaders: Record<string, string> = buildStreamHeaders(remoteUrl);
 
-    // Always send a Range header (even for the first request): Google's
-    // audio endpoints answer a header-only 200 and then stall forever.
-    reqHeaders['Range'] = `bytes=${existingBytes}-`;
-
-    const response = await fetch(remoteUrl, {
-      headers: reqHeaders,
-      signal: abortController.signal,
-    });
-
-    if (!response.ok && response.status !== 206) {
-      throw new Error(`Remote server responded with HTTP ${response.status}: ${response.statusText}`);
-    }
-
-    const isPartial = response.status === 206;
-    const contentLength = parseInt(response.headers.get('content-length') || '0', 10);
-    const totalBytes = isPartial ? existingBytes + contentLength : (contentLength || 0);
-
-    job.downloadMeta = {
-      remoteUrl,
-      etag: response.headers.get('etag') || undefined,
-      lastModified: response.headers.get('last-modified') || undefined,
-      supportsRange: response.headers.get('accept-ranges') === 'bytes' || isPartial,
-      downloadedBytes: isPartial ? existingBytes : 0,
-      totalBytes,
-    };
-
-    const fileStream = createWriteStream(job.sourcePath, {
-      flags: isPartial ? 'a' : 'w',
-    });
-
-    if (!response.body) {
-      throw new Error('Response body is empty or null.');
-    }
-
-    const reader = response.body.getReader();
-    let currentBytes = isPartial ? existingBytes : 0;
-    let lastTime = Date.now();
-    let lastBytes = currentBytes;
+    let lastEmitAt = Date.now();
+    let lastEmitBytes = existingBytes;
 
     try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+      const result = await streamDownloadToFile(remoteUrl, job.sourcePath, {
+        headers: reqHeaders,
+        startByte: existingBytes,
+        signal: abortController.signal,
+        onProgress: (receivedBytes, totalBytes) => {
+          const now = Date.now();
+          const elapsed = (now - lastEmitAt) / 1000;
+          if (elapsed < 0.5 && receivedBytes < totalBytes) return;
 
-        fileStream.write(Buffer.from(value));
-        currentBytes += value.length;
-
-        const now = Date.now();
-        const elapsed = (now - lastTime) / 1000;
-
-        if (elapsed >= 0.5) {
-          const speed = (currentBytes - lastBytes) / elapsed;
-          const percent = totalBytes > 0 ? Math.min(99, Math.round((currentBytes / totalBytes) * 100)) : 50;
-          const remainingSec = (totalBytes > 0 && speed > 0) ? Math.round((totalBytes - currentBytes) / speed) : 0;
+          const speed = elapsed > 0 ? (receivedBytes - lastEmitBytes) / elapsed : 0;
+          const percent = totalBytes > 0 ? Math.min(99, Math.round((receivedBytes / totalBytes) * 100)) : 50;
+          const remainingSec = totalBytes > 0 && speed > 0 ? Math.round((totalBytes - receivedBytes) / speed) : 0;
 
           this.emitProgress(jobId, {
             percent,
-            downloadedBytes: currentBytes,
+            downloadedBytes: receivedBytes,
             totalBytes,
             speedBytesPerSec: speed,
             timeRemainingSec: remainingSec,
-            stageName: `Downloading (${(currentBytes / (1024 * 1024)).toFixed(1)} / ${(totalBytes / (1024 * 1024)).toFixed(1)} MB)`,
+            stageName: `Downloading (${(receivedBytes / (1024 * 1024)).toFixed(1)} / ${(
+              totalBytes / (1024 * 1024)
+            ).toFixed(1)} MB)`,
           });
 
-          lastTime = now;
-          lastBytes = currentBytes;
-        }
-      }
-
-      await new Promise<void>((resolve, reject) => {
-        fileStream.end((err?: Error | null) => {
-          if (err) reject(err);
-          else resolve();
-        });
+          lastEmitAt = now;
+          lastEmitBytes = receivedBytes;
+        },
       });
+
+      job.downloadMeta = {
+        remoteUrl,
+        supportsRange: result.supportsRange,
+        downloadedBytes: result.bytes,
+        totalBytes: result.totalBytes || result.bytes,
+      };
 
       this.emitProgress(jobId, {
         percent: 100,
-        downloadedBytes: currentBytes,
-        totalBytes: currentBytes,
+        downloadedBytes: result.bytes,
+        totalBytes: result.bytes,
         stageName: 'Download complete',
       });
 
       return job.sourcePath;
     } catch (err: any) {
-      fileStream.close();
+      // The shared writer closes the file handle itself on every path.
       if (err.name === 'AbortError') {
         this.emitProgress(jobId, { status: 'PAUSED', stageName: 'Download paused by user.' });
         throw err;

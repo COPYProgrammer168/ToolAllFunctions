@@ -217,7 +217,58 @@ export async function probeStreamBitrate(sourceUrl: string): Promise<number | nu
   }
 }
 
+/**
+ * Client-side mirror of the server's 10-minute analysis cache.
+ *
+ * Analyze, Preview, Play and Download can all be triggered for the same link,
+ * and the server rate-limits `/api/media/analyze` per IP. Serving a URL we
+ * already know from memory keeps normal browsing far below that limit instead
+ * of exhausting it in seconds.
+ */
+const ANALYSIS_CACHE_TTL_MS = 10 * 60 * 1000;
+const analysisResultCache = new Map<string, { result: MediaAnalysisResult; expiresAt: number }>();
+
+/** Same key the server uses, so `?si=…&utm_source=…` links collapse to one entry. */
+function normalizeAnalysisKey(url: string): string {
+  try {
+    const parsed = new URL(url.trim());
+    for (const key of [...parsed.searchParams.keys()]) {
+      if (key.startsWith('utm_') || ['si', 'feature', 'igsh', 'igshid', 'fbclid', 'ref'].includes(key)) {
+        parsed.searchParams.delete(key);
+      }
+    }
+    return `${parsed.origin}${parsed.pathname.replace(/\/+$/, '')}${parsed.search}`;
+  } catch {
+    return url.trim();
+  }
+}
+
+/** Drop every cached analysis; next request goes to the server again. */
+export function clearMediaAnalysisCache(): void {
+  analysisResultCache.clear();
+}
+
+/**
+ * A cache hit for this exact link, without waiting for a round trip.
+ * Returns `null` on a miss or once the entry expires.
+ */
+export function peekCachedAnalysis(url: string): MediaAnalysisResult | null {
+  const entry = analysisResultCache.get(normalizeAnalysisKey(url));
+  if (!entry) return null;
+  if (entry.expiresAt <= Date.now()) {
+    analysisResultCache.delete(normalizeAnalysisKey(url));
+    return null;
+  }
+  return entry.result;
+}
+
 export async function analyzeMediaUrl(url: string): Promise<MediaAnalysisResult> {
+  const cacheKey = normalizeAnalysisKey(url);
+
+  // Serve from memory when we already have a fresh answer for this link.
+  const cached = peekCachedAnalysis(url);
+  if (cached) return cached;
+
   const res = await fetch('/api/media/analyze', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -228,7 +279,9 @@ export async function analyzeMediaUrl(url: string): Promise<MediaAnalysisResult>
     throw mediaRequestError(res, await readErrorBody(res), `Failed to analyze media URL (HTTP ${res.status})`);
   }
 
-  return res.json();
+  const result = await res.json();
+  analysisResultCache.set(cacheKey, { result, expiresAt: Date.now() + ANALYSIS_CACHE_TTL_MS });
+  return result;
 }
 
 export async function startMediaDownload(params: {

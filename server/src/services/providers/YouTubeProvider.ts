@@ -2,7 +2,8 @@ import type { IMediaProvider, MediaAnalysisResult, MediaFormatOption, MediaTrack
 import fs from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { rememberStreamCredentials } from '../StreamCredentials.js';
+import { rememberStreamCredentials, buildStreamHeaders } from '../StreamCredentials.js';
+import { parseContentRange } from '../../utils/streamRange.js';
 import { YTDLP_UA, findYtDlp, readCookieJarHeader, tempCookieJar } from '../../utils/ytDlp.js';
 import { findCookiesFile } from '../../utils/cookies.js';
 import { fetchWithRetry } from '../../utils/httpFetch.js';
@@ -16,6 +17,15 @@ const UA =
 /** Innertube params for the channel "Videos" tab */
 const CHANNEL_VIDEOS_PARAMS = 'EgZ2aWRlb3PyBgQKAjoA';
 const MAX_CHANNEL_VIDEOS = 200;
+
+/** A stream URL offered by an Innertube client, with its presentation hints. */
+interface StreamCandidate {
+  url: string;
+  /** True when the stream carries both audio and video (itag 18 style). */
+  muxed: boolean;
+  resolution?: string;
+  fps?: number;
+}
 
 export class YouTubeProvider implements IMediaProvider {
   public id = 'youtube';
@@ -59,13 +69,19 @@ export class YouTubeProvider implements IMediaProvider {
     // Attempt to resolve direct, authorized stream URLs via the public
     // Innertube player API metadata embedded in the watch page. Streams
     // exposed this way are publicly addressable without DRM circumvention.
+    // Candidate streams per kind, gathered from every Innertube client that
+    // answers. They are verified against the CDN further down, because several
+    // profiles are refused outright (see `firstServableStream`).
+    const muxedCandidates: StreamCandidate[] = [];
+    const adaptiveVideoCandidates: StreamCandidate[] = [];
+    const audioCandidates: string[] = [];
     let directVideoUrl: string | undefined;
-    let directAudioUrl: string | undefined;
     let adaptiveVideoUrl: string | undefined;
     let adaptiveVideoResolution: string | undefined;
     let adaptiveVideoFps: number | undefined;
     let videoResolution: string | undefined;
     let videoFps: number | undefined;
+    let directAudioUrl: string | undefined;
     let videoDurationSec = 0;
     let playabilityReason: string | undefined;
     let failureReason: string | undefined;
@@ -166,9 +182,12 @@ export class YouTubeProvider implements IMediaProvider {
                 .filter((f: any) => f.url && /video\/mp4/.test(f.mimeType || ''))
                 .sort((a: any, b: any) => (b.bitrate || 0) - (a.bitrate || 0));
               if (muxedOnly.length > 0) {
-                directVideoUrl = directVideoUrl || muxedOnly[0].url;
-                videoResolution = videoResolution || muxedOnly[0].qualityLabel || muxedOnly[0].quality;
-                videoFps = videoFps || muxedOnly[0].fps;
+                muxedCandidates.push({
+                  url: muxedOnly[0].url,
+                  muxed: true,
+                  resolution: muxedOnly[0].qualityLabel || muxedOnly[0].quality,
+                  fps: muxedOnly[0].fps,
+                });
               }
 
               // Best adaptive video-only stream (used for muxing when no
@@ -181,12 +200,12 @@ export class YouTubeProvider implements IMediaProvider {
                   return score(b) - score(a);
                 });
               if (adaptiveVideos.length > 0) {
-                adaptiveVideoUrl = adaptiveVideoUrl || adaptiveVideos[0].url;
-                adaptiveVideoResolution =
-                  adaptiveVideoResolution ||
-                  adaptiveVideos[0].qualityLabel ||
-                  adaptiveVideos[0].quality;
-                adaptiveVideoFps = adaptiveVideoFps || adaptiveVideos[0].fps;
+                adaptiveVideoCandidates.push({
+                  url: adaptiveVideos[0].url,
+                  muxed: false,
+                  resolution: adaptiveVideos[0].qualityLabel || adaptiveVideos[0].quality,
+                  fps: adaptiveVideos[0].fps,
+                });
               }
 
               // Audio-only M4A adaptive stream for the audio extraction path.
@@ -195,19 +214,46 @@ export class YouTubeProvider implements IMediaProvider {
                 .filter((f: any) => f.url && /audio\/mp4/.test(f.mimeType || ''))
                 .sort((a: any, b: any) => (b.bitrate || 0) - (a.bitrate || 0));
               if (audio.length > 0) {
-                directAudioUrl = directAudioUrl || audio[0].url;
+                audioCandidates.push(audio[0].url);
               }
 
               // Keep trying client profiles until we have both a playable
               // video stream and an audio stream (a muxed stream supplies
               // audio on its own, but an audio-only track is still preferred
               // for the audio extraction formats).
-              const haveVideo = !!(directVideoUrl || adaptiveVideoUrl);
-              if (haveVideo && (directAudioUrl || directVideoUrl)) break;
+              const haveVideoCandidate = muxedCandidates.length > 0 || adaptiveVideoCandidates.length > 0;
+              if (haveVideoCandidate && (audioCandidates.length > 0 || muxedCandidates.length > 0)) break;
             } catch {
               // Try the next client profile
             }
           }
+
+          // Several Innertube profiles are refused by the CDN outright — the
+          // audio-only DASH streams in particular require a PO token and answer
+          // HTTP 403, which is what made every music download fail. Verify the
+          // candidates with the same headers the download worker uses and keep
+          // only a stream the CDN will actually serve.
+          const chosenVideo = await this.firstServableStream([
+            ...muxedCandidates,
+            ...adaptiveVideoCandidates,
+          ]);
+          if (chosenVideo) {
+            if (chosenVideo.muxed) {
+              directVideoUrl = chosenVideo.url;
+              videoResolution = videoResolution || chosenVideo.resolution;
+              videoFps = videoFps || chosenVideo.fps;
+            } else {
+              adaptiveVideoUrl = chosenVideo.url;
+              adaptiveVideoResolution = adaptiveVideoResolution || chosenVideo.resolution;
+              adaptiveVideoFps = adaptiveVideoFps || chosenVideo.fps;
+            }
+          }
+
+          directAudioUrl = await this.firstServableAudioUrl(audioCandidates);
+
+          // No servable audio-only stream: the audio extraction formats fall
+          // back to the muxed stream (`directAudioUrl || directVideoUrl`), whose
+          // audio is demuxed locally by ffmpeg.
         }
       }
     } catch (err) {
@@ -230,8 +276,20 @@ export class YouTubeProvider implements IMediaProvider {
     // call refuses to answer.
     if (!directVideoUrl && !adaptiveVideoUrl && !directAudioUrl) {
       const viaYtDlp = await this.ytDlpExtractMedia(videoId, url);
-      if (viaYtDlp.videoUrl) directVideoUrl = viaYtDlp.videoUrl;
-      if (viaYtDlp.audioUrl) directAudioUrl = viaYtDlp.audioUrl;
+      // yt-dlp's URLs are verified like any other: some of its formats are
+      // served with the same first-bytes-only limitation, and offering one
+      // would just move the 403 from the analyze step into the download job.
+      const ytDlpVideo = viaYtDlp.videoUrl
+        ? await this.firstServableStream([{ url: viaYtDlp.videoUrl, muxed: true }])
+        : undefined;
+      const ytDlpAudio = viaYtDlp.audioUrl
+        ? await this.firstServableAudioUrl([viaYtDlp.audioUrl])
+        : undefined;
+      if (ytDlpVideo) {
+        directVideoUrl = ytDlpVideo.url;
+        videoResolution = videoResolution || ytDlpVideo.resolution;
+      }
+      if (ytDlpAudio) directAudioUrl = ytDlpAudio;
       if (viaYtDlp.durationSec && !videoDurationSec) videoDurationSec = viaYtDlp.durationSec;
       if (viaYtDlp.title && title === 'YouTube Media') title = viaYtDlp.title;
       if (viaYtDlp.author && author === 'Unknown Creator') author = viaYtDlp.author;
@@ -319,6 +377,104 @@ export class YouTubeProvider implements IMediaProvider {
       rawVideoUrl: directVideoUrl || adaptiveVideoUrl,
       rawAudioUrl: directAudioUrl,
     };
+  }
+
+  /**
+   * True when the CDN will actually serve this stream.
+   *
+   * A single ranged byte is enough: it proves the request is accepted without
+   * transferring the payload, and it uses the exact headers the download worker
+   * builds (`buildStreamHeaders`), so a pass here means the download will pass.
+   * A 4xx/5xx (notably 403 from audio-only profiles) simply disqualifies the
+   * candidate and the next one is tried.
+   */
+  /**
+   * True when the CDN will actually serve the *whole* stream.
+   *
+   * A stream that only answers for its first ~2 MB cannot complete a download,
+   * so it must be rejected rather than offered (the audio download would fail
+   * part-way, which is how this showed up: `FAILED 32%` after 1.0 MB).
+   *
+   * Size matters: probing a fixed large offset lands past the end of a small
+   * file and returns an ambiguous `416`, which used to look like success. So the
+   * probe reads the real size first and only tests an offset that is genuinely
+   * inside the file.
+   */
+  private async isStreamServable(url: string): Promise<boolean> {
+    if (!url) return false;
+    /** Verified-safe byte window served from the start of a stream. */
+    const FIRST_WINDOW_BYTES = 2 * 1024 * 1024;
+    /** Offset known to be refused once a stream is limited to that window. */
+    const BEYOND_WINDOW_OFFSET = 3 * 1024 * 1024;
+
+    try {
+      // 1. First two bytes: proves the stream starts and discloses its size.
+      const head = await fetchWithRetry(
+        url,
+        {
+          method: 'GET',
+          headers: buildStreamHeaders(url, { Range: 'bytes=0-1' }),
+          redirect: 'follow',
+          signal: AbortSignal.timeout(8000),
+        },
+        'YouTube stream probe'
+      );
+      if (head.status === 403 || head.status === 416) return false;
+      if (!head.ok && head.status !== 206) return false;
+      await head.arrayBuffer().catch(() => {});
+
+      // `Content-Range: bytes 0-1/<total>`. Without a size we cannot tell whether
+      // the rest of the file is reachable, so accept what starts cleanly.
+      const total = parseContentRange(head.headers.get('content-range'))?.total;
+      if (!total) return true;
+
+      // 2. Only probe an offset that is still inside the file — for anything
+      //    shorter than the window the whole file is reachable anyway.
+      const probeOffset = Math.min(BEYOND_WINDOW_OFFSET, total - 1);
+      if (probeOffset <= FIRST_WINDOW_BYTES) return true;
+
+      const mid = await fetchWithRetry(
+        url,
+        {
+          method: 'GET',
+          headers: buildStreamHeaders(url, {
+            Range: `bytes=${probeOffset}-${probeOffset + 1}`,
+          }),
+          redirect: 'follow',
+          signal: AbortSignal.timeout(8000),
+        },
+        'YouTube stream probe'
+      );
+      await mid.arrayBuffer().catch(() => {});
+      if (mid.status === 403) return false;
+      return mid.ok || mid.status === 206 || mid.status === 416;
+    } catch (err) {
+      // A platform-wide rate limit must still surface as 429.
+      if (err instanceof RateLimitedError) throw err;
+      return false;
+    }
+  }
+
+  /** First candidate the CDN serves, in preference order, or `undefined`. */
+  private async firstServableStream(candidates: StreamCandidate[]): Promise<StreamCandidate | undefined> {
+    const seen = new Set<string>();
+    for (const candidate of candidates) {
+      if (!candidate.url || seen.has(candidate.url)) continue;
+      seen.add(candidate.url);
+      if (await this.isStreamServable(candidate.url)) return candidate;
+    }
+    return undefined;
+  }
+
+  /** URL of the first servable audio-only stream, or `undefined`. */
+  private async firstServableAudioUrl(candidates: string[]): Promise<string | undefined> {
+    const seen = new Set<string>();
+    for (const candidate of candidates) {
+      if (!candidate || seen.has(candidate)) continue;
+      seen.add(candidate);
+      if (await this.isStreamServable(candidate)) return candidate;
+    }
+    return undefined;
   }
 
   /**
