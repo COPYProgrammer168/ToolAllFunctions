@@ -9,6 +9,20 @@ export interface MediaFormatOption {
   filesizeEstimateBytes?: number;
   isLossless?: boolean;
   directDownloadUrl?: string;
+  /**
+   * Adaptive video-only stream URL. When set together with `audioUrl`, the
+   * download worker muxes both tracks with ffmpeg (YouTube adaptive formats).
+   */
+  videoUrl?: string;
+  /** Adaptive audio-only stream URL — the muxing partner of `videoUrl`. */
+  audioUrl?: string;
+  /**
+   * Segmented HLS manifest URLs. When set, the download worker streams the
+   * manifest with ffmpeg instead of a single ranged request — used for YouTube
+   * streams the CDN throttles per-URL.
+   */
+  hlsVideoUrl?: string;
+  hlsAudioUrl?: string;
   notes?: string;
 }
 

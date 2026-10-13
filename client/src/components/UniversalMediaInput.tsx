@@ -307,23 +307,25 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
     setDownloadingId(format.id);
 
     try {
+      // A video format carrying an explicit adaptive videoUrl + audioUrl pair
+      // is muxed server-side (e.g. YouTube's 1080p+ adaptive streams). HLS
+      // manifests are streamed by ffmpeg. Without the pair, directDownloadUrl
+      // points at a self-contained stream.
       const useAdaptiveMux =
-        format.type === 'video' &&
-        !analysis.rawMuxedUrl &&
-        analysis.rawVideoUrl &&
-        analysis.rawAudioUrl;
+        format.type === 'video' && !!format.videoUrl && !!format.audioUrl;
+      const useHls = !!format.hlsVideoUrl || (format.type === 'audio' && !!format.hlsAudioUrl);
 
       const job = await startMediaDownload({
         sourceUrl: analysis.sourceUrl || format.directDownloadUrl || '',
-        directUrl: useAdaptiveMux
-          ? undefined
-          : format.directDownloadUrl || analysis.rawSourceUrl,
+        directUrl: useAdaptiveMux || useHls ? undefined : format.directDownloadUrl || analysis.rawSourceUrl,
         title: analysis.title,
         type: format.type,
         format: format.format,
         customBitrate: format.bitrateKbps,
-        videoUrl: useAdaptiveMux ? analysis.rawVideoUrl : undefined,
-        audioUrl: useAdaptiveMux ? analysis.rawAudioUrl : undefined,
+        videoUrl: useAdaptiveMux ? format.videoUrl : undefined,
+        audioUrl: useAdaptiveMux ? format.audioUrl : undefined,
+        hlsVideoUrl: format.hlsVideoUrl,
+        hlsAudioUrl: format.hlsAudioUrl,
       });
 
       if (onJobStarted) {

@@ -23,6 +23,7 @@ import { OutroEditorView } from './components/OutroEditorView';
 import { DownloadManagerView } from './components/DownloadManagerView';
 import { BlenderView } from './components/BlenderView';
 import { MediaSettingsModal } from './components/MediaSettingsModal';
+import { FontStudioView } from './components/FontStudioView';
 
 import {
   analyzeVideoFile,
@@ -225,14 +226,23 @@ function App() {
 
   const handleDirectDownload = async (format: MediaFormatOption) => {
     try {
+      // Adaptive formats carry a videoUrl+audioUrl pair that must be muxed
+      // server-side; HLS formats are streamed by ffmpeg; self-contained
+      // formats download from directDownloadUrl.
+      const useAdaptiveMux = format.type === 'video' && !!format.videoUrl && !!format.audioUrl;
+      const useHls = !!format.hlsVideoUrl || (format.type === 'audio' && !!format.hlsAudioUrl);
       const directUrl = format.directDownloadUrl;
-      if (!directUrl) {
+      if (!useAdaptiveMux && !useHls && !directUrl) {
         alert('No downloadable URL is available for this format.');
         return;
       }
       await startMediaDownload({
         sourceUrl: directUrl,
-        directUrl: directUrl,
+        directUrl: useAdaptiveMux || useHls ? undefined : directUrl,
+        videoUrl: useAdaptiveMux ? format.videoUrl : undefined,
+        audioUrl: useAdaptiveMux ? format.audioUrl : undefined,
+        hlsVideoUrl: format.hlsVideoUrl,
+        hlsAudioUrl: format.hlsAudioUrl,
         title: format.qualityLabel,
         type: format.type,
         format: format.format,
@@ -287,6 +297,9 @@ function App() {
         />
 
         <main className="flex-1 flex flex-col p-4 sm:p-6 lg:p-8 max-w-7xl w-full mx-auto">
+          {/* VIEW: FONT STUDIO / TEXT FORGE */}
+          {activeSection === 'font-studio' && <FontStudioView />}
+
           {/* VIEW: STUDIO VIDEO OPTIMIZER */}
           {activeSection === 'studio-optimize' && (
             <div className="flex-1 flex flex-col">

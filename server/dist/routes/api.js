@@ -452,38 +452,55 @@ apiRouter.post('/media/download', async (req, res) => {
         // resolve the real downloadable stream server-side before starting the job.
         let downloadTargetUrl = directUrl || sourceUrl;
         let muxUrls = null;
+        let hlsVideoUrl = req.body.hlsVideoUrl;
+        let hlsAudioUrl = req.body.hlsAudioUrl;
         // Explicit adaptive video+audio pair -> mux with ffmpeg.
         if (type === 'video' && req.body.videoUrl && req.body.audioUrl) {
             muxUrls = { video: req.body.videoUrl, audio: req.body.audioUrl };
             downloadTargetUrl = req.body.videoUrl;
         }
-        if (!muxUrls && !directUrl && sourceUrl && !/\.(mp4|webm|mov|mkv|avi|m4v|mp3|m4a|wav|flac|aac|ogg|jpg|jpeg|png|webp|avif|gif)(\?|$)/i.test(sourceUrl)) {
+        if (!muxUrls && !directUrl && !hlsVideoUrl && !hlsAudioUrl && sourceUrl && !/\.(mp4|webm|mov|mkv|avi|m4v|mp3|m4a|wav|flac|aac|ogg|jpg|jpeg|png|webp|avif|gif)(\?|$)/i.test(sourceUrl)) {
             try {
                 const resolved = await MediaSourceResolver.resolveAndAnalyze(sourceUrl);
-                if (type === 'video' && !resolved.rawMuxedUrl && resolved.rawVideoUrl && resolved.rawAudioUrl) {
-                    muxUrls = { video: resolved.rawVideoUrl, audio: resolved.rawAudioUrl };
-                    downloadTargetUrl = resolved.rawVideoUrl;
+                // Prefer the segmented HLS variants when the analysis resolved them:
+                // progressive streams are throttled after ~23 MB per URL.
+                const hlsVideo = resolved.availableFormats.find((f) => f.type === 'video' && f.hlsVideoUrl);
+                const hlsAudio = resolved.availableFormats.find((f) => f.type === 'audio' && f.hlsAudioUrl);
+                if (type === 'video' && hlsVideo?.hlsVideoUrl) {
+                    hlsVideoUrl = hlsVideo.hlsVideoUrl;
+                    hlsAudioUrl = hlsVideo.hlsAudioUrl || hlsAudio?.hlsAudioUrl;
                 }
-                else {
-                    const direct = type === 'audio'
-                        ? resolved.rawAudioUrl ||
-                            resolved.rawMuxedUrl ||
-                            resolved.rawSourceUrl ||
-                            resolved.availableFormats.find((f) => f.type === 'audio' && f.directDownloadUrl)?.directDownloadUrl
-                        : resolved.rawMuxedUrl ||
-                            resolved.rawVideoUrl ||
-                            resolved.availableFormats.find((f) => f.type === 'video' && f.directDownloadUrl)?.directDownloadUrl;
-                    if (!direct) {
-                        return res.status(400).json({
-                            error: resolved.authorizedNotice ||
-                                'Could not resolve a direct downloadable stream for this URL (private, region-locked, age-restricted, or DRM protected). Try re-running the analysis or paste a direct media file link.',
-                            technicalDetails: {
-                                platform: resolved.platform,
-                                downloadAuthorized: resolved.downloadAuthorized,
-                            },
-                        });
+                else if (type === 'audio' && (hlsAudio?.hlsAudioUrl || hlsVideo?.hlsAudioUrl)) {
+                    hlsAudioUrl = hlsAudio?.hlsAudioUrl || hlsVideo?.hlsAudioUrl;
+                }
+                if (!hlsVideoUrl && !hlsAudioUrl) {
+                    if (type === 'video' && resolved.rawVideoUrl && resolved.rawAudioUrl) {
+                        // Prefer the highest adaptive pair (muxed with ffmpeg below) over a
+                        // low-resolution muxed stream — e.g. YouTube's 360p itag-18.
+                        muxUrls = { video: resolved.rawVideoUrl, audio: resolved.rawAudioUrl };
+                        downloadTargetUrl = resolved.rawVideoUrl;
                     }
-                    downloadTargetUrl = direct;
+                    else {
+                        const direct = type === 'audio'
+                            ? resolved.rawAudioUrl ||
+                                resolved.rawMuxedUrl ||
+                                resolved.rawSourceUrl ||
+                                resolved.availableFormats.find((f) => f.type === 'audio' && f.directDownloadUrl)?.directDownloadUrl
+                            : resolved.rawMuxedUrl ||
+                                resolved.rawVideoUrl ||
+                                resolved.availableFormats.find((f) => f.type === 'video' && f.directDownloadUrl)?.directDownloadUrl;
+                        if (!direct) {
+                            return res.status(400).json({
+                                error: resolved.authorizedNotice ||
+                                    'Could not resolve a direct downloadable stream for this URL (private, region-locked, age-restricted, or DRM protected). Try re-running the analysis or paste a direct media file link.',
+                                technicalDetails: {
+                                    platform: resolved.platform,
+                                    downloadAuthorized: resolved.downloadAuthorized,
+                                },
+                            });
+                        }
+                        downloadTargetUrl = direct;
+                    }
                 }
             }
             catch (err) {
@@ -497,7 +514,7 @@ apiRouter.post('/media/download', async (req, res) => {
                 return respondApiError(res, err, 400);
             }
         }
-        if (!downloadTargetUrl) {
+        if (!downloadTargetUrl && !hlsVideoUrl && !hlsAudioUrl) {
             return res.status(400).json({ error: 'A valid download URL is required.' });
         }
         // Detect the actual source file format from the URL to set proper file extensions
@@ -511,7 +528,41 @@ apiRouter.post('/media/download', async (req, res) => {
         (async () => {
             try {
                 let downloadedSource;
-                if (muxUrls) {
+                if (hlsVideoUrl && type === 'video') {
+                    // Segmented HLS: ffmpeg fetches every segment itself, which is the
+                    // only way past the CDN's per-URL byte budget for progressive
+                    // streams. Video and audio manifests are mapped explicitly so the
+                    // result always has sound.
+                    MediaJobManager.emitProgress(job.id, {
+                        status: 'DOWNLOADING',
+                        stageName: 'Downloading segmented stream (HLS)…',
+                    });
+                    const { execFile } = await import('node:child_process');
+                    const hlsArgs = ['-y', '-i', hlsVideoUrl];
+                    if (hlsAudioUrl) {
+                        hlsArgs.push('-i', hlsAudioUrl, '-map', '0:v:0', '-map', '1:a:0');
+                    }
+                    hlsArgs.push('-c', 'copy', '-movflags', '+faststart', job.outputPath);
+                    await new Promise((resolve, reject) => {
+                        execFile(ffmpegBin(), hlsArgs, { timeout: 60 * 60 * 1000, maxBuffer: 8 * 1024 * 1024 }, (err) => err ? reject(err) : resolve());
+                    });
+                    downloadedSource = job.outputPath;
+                }
+                else if (hlsAudioUrl && type === 'audio') {
+                    // Segmented audio: pull the manifest to a local m4a first, then the
+                    // regular extraction path converts it to the requested format.
+                    MediaJobManager.emitProgress(job.id, {
+                        status: 'DOWNLOADING',
+                        stageName: 'Downloading segmented audio (HLS)…',
+                    });
+                    const hlsAudioTmp = path.join(job.jobDir, 'working', `hls_audio_${job.id}.m4a`);
+                    const { execFile } = await import('node:child_process');
+                    await new Promise((resolve, reject) => {
+                        execFile(ffmpegBin(), ['-y', '-i', hlsAudioUrl, '-c', 'copy', hlsAudioTmp], { timeout: 30 * 60 * 1000, maxBuffer: 8 * 1024 * 1024 }, (err) => (err ? reject(err) : resolve()));
+                    });
+                    downloadedSource = hlsAudioTmp;
+                }
+                else if (muxUrls) {
                     // googlevideo CDN rejects plain ffmpeg HTTP probes, so download both
                     // tracks with ranged HTTP requests first, then mux locally.
                     const jobDir = job.outputPath.replace(/[\\/][^\\/]+$/, '');
@@ -523,7 +574,20 @@ apiRouter.post('/media/download', async (req, res) => {
                     ]);
                     const { execFile } = await import('node:child_process');
                     await new Promise((resolve, reject) => {
-                        execFile(ffmpegBin(), ['-y', '-i', videoTmp, '-i', audioTmp, '-c:v', 'copy', '-c:a', 'aac', '-movflags', '+faststart', job.outputPath], (err) => (err ? reject(err) : resolve()));
+                        execFile(ffmpegBin(), [
+                            '-y',
+                            '-i', videoTmp,
+                            '-i', audioTmp,
+                            // Explicit mapping: video always comes from the first input
+                            // (the high-quality adaptive track), audio from the second
+                            // (an audio-only stream, or the muxed stream's audio track).
+                            '-map', '0:v:0',
+                            '-map', '1:a:0',
+                            '-c:v', 'copy',
+                            '-c:a', 'aac',
+                            '-movflags', '+faststart',
+                            job.outputPath,
+                        ], (err) => (err ? reject(err) : resolve()));
                     });
                     await fs.unlink(videoTmp).catch(() => { });
                     await fs.unlink(audioTmp).catch(() => { });
@@ -558,8 +622,9 @@ apiRouter.post('/media/download', async (req, res) => {
                 }
                 else {
                     // Video: copy directly (already in target format)
-                    if (muxUrls) {
-                        // Already muxed to job.outputPath by ffmpeg above.
+                    if (muxUrls || downloadedSource === job.outputPath) {
+                        // Already muxed to job.outputPath by ffmpeg above (or the HLS
+                        // branch wrote the final file there directly).
                     }
                     else if (format === 'original' || downloadedSource.endsWith(`.${format}`) || format === 'mp4') {
                         await fs.copyFile(downloadedSource, job.outputPath);

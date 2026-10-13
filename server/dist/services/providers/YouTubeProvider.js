@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { rememberStreamCredentials, buildStreamHeaders } from '../StreamCredentials.js';
 import { parseContentRange } from '../../utils/streamRange.js';
-import { YTDLP_UA, findYtDlp, readCookieJarHeader, tempCookieJar } from '../../utils/ytDlp.js';
+import { YTDLP_UA, findYtDlpInvocation, readCookieJarHeader, tempCookieJar } from '../../utils/ytDlp.js';
 import { findCookiesFile } from '../../utils/cookies.js';
 import { fetchWithRetry } from '../../utils/httpFetch.js';
 import { RateLimitedError } from '../../utils/errors.js';
@@ -12,6 +12,37 @@ const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 /** Innertube params for the channel "Videos" tab */
 const CHANNEL_VIDEOS_PARAMS = 'EgZ2aWRlb3PyBgQKAjoA';
 const MAX_CHANNEL_VIDEOS = 200;
+/**
+ * Progressive (single-URL) googlevideo streams are throttled after roughly
+ * ~23 MB from datacenter IPs (verified: 206 for bounded chunks until a
+ * per-URL byte budget runs out, then 403 for the rest of the file). Anything
+ * larger cannot finish a direct download and must use the segmented HLS path.
+ */
+const SAFE_PROGRESSIVE_BYTES = 15 * 1024 * 1024;
+/** Rank adaptive video candidates: H.264/MP4 first (copy-friendly), then height. */
+function adaptiveScore(c) {
+    const avc = /avc1|h264/i.test(c.codec || '') ? 1 : 0;
+    return avc * 1e12 + (c.height || 0) * 1e4 + (c.fps || 0);
+}
+/** Primary codec id from a `video/mp4; codecs="avc1.4d401f"` mime type. */
+function codecFromMime(mime) {
+    const m = /codecs="([^"]+)"/.exec(mime || '');
+    return m ? m[1] : '';
+}
+/** De-duplicate candidates by URL, keeping the first (best-ranked) occurrence. */
+function dedupeCandidates(candidates) {
+    const seen = new Set();
+    return candidates.filter((c) => {
+        if (!c.url || seen.has(c.url))
+            return false;
+        seen.add(c.url);
+        return true;
+    });
+}
+/** De-duplicate plain URLs. */
+function dedupeUrls(urls) {
+    return [...new Set(urls.filter(Boolean))];
+}
 export class YouTubeProvider {
     id = 'youtube';
     displayName = 'YouTube';
@@ -55,6 +86,9 @@ export class YouTubeProvider {
         const muxedCandidates = [];
         const adaptiveVideoCandidates = [];
         const audioCandidates = [];
+        /** Best verified candidates (assigned inside the try block below). */
+        let bestMuxed;
+        let bestAdaptive;
         let directVideoUrl;
         let adaptiveVideoUrl;
         let adaptiveVideoResolution;
@@ -151,28 +185,42 @@ export class YouTubeProvider {
                             const muxedOnly = (data.streamingData?.formats || [])
                                 .filter((f) => f.url && /video\/mp4/.test(f.mimeType || ''))
                                 .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
-                            if (muxedOnly.length > 0) {
+                            for (const f of muxedOnly.slice(0, 2)) {
                                 muxedCandidates.push({
-                                    url: muxedOnly[0].url,
+                                    url: f.url,
                                     muxed: true,
-                                    resolution: muxedOnly[0].qualityLabel || muxedOnly[0].quality,
-                                    fps: muxedOnly[0].fps,
+                                    resolution: f.qualityLabel || f.quality,
+                                    fps: f.fps,
+                                    bitrate: f.bitrate,
+                                    contentLength: Number(f.contentLength) || 0,
                                 });
                             }
                             // Best adaptive video-only stream (used for muxing when no
                             // muxed stream is available, e.g. most modern YouTube uploads).
                             const adaptiveVideos = (data.streamingData?.adaptiveFormats || [])
                                 .filter((f) => f.url && /video\/mp4/.test(f.mimeType || ''))
-                                .sort((a, b) => {
-                                const score = (f) => (f.mimeType?.includes('avc1') ? 1e12 : 0) + (f.height || 0);
-                                return score(b) - score(a);
-                            });
-                            if (adaptiveVideos.length > 0) {
-                                adaptiveVideoCandidates.push({
-                                    url: adaptiveVideos[0].url,
+                                .map((f) => ({
+                                f,
+                                score: adaptiveScore({
+                                    url: '',
                                     muxed: false,
-                                    resolution: adaptiveVideos[0].qualityLabel || adaptiveVideos[0].quality,
-                                    fps: adaptiveVideos[0].fps,
+                                    height: f.height,
+                                    fps: f.fps,
+                                    codec: codecFromMime(f.mimeType),
+                                }),
+                            }))
+                                .sort((a, b) => b.score - a.score)
+                                .map((x) => x.f);
+                            for (const f of adaptiveVideos.slice(0, 3)) {
+                                adaptiveVideoCandidates.push({
+                                    url: f.url,
+                                    muxed: false,
+                                    resolution: f.qualityLabel || f.quality,
+                                    fps: f.fps,
+                                    height: f.height,
+                                    codec: codecFromMime(f.mimeType),
+                                    bitrate: f.bitrate,
+                                    contentLength: Number(f.contentLength) || 0,
                                 });
                             }
                             // Audio-only M4A adaptive stream for the audio extraction path.
@@ -180,46 +228,41 @@ export class YouTubeProvider {
                             const audio = audioPool
                                 .filter((f) => f.url && /audio\/mp4/.test(f.mimeType || ''))
                                 .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
-                            if (audio.length > 0) {
-                                audioCandidates.push(audio[0].url);
+                            for (const f of audio.slice(0, 2)) {
+                                audioCandidates.push(f.url);
                             }
-                            // Keep trying client profiles until we have both a playable
-                            // video stream and an audio stream (a muxed stream supplies
-                            // audio on its own, but an audio-only track is still preferred
-                            // for the audio extraction formats).
-                            const haveVideoCandidate = muxedCandidates.length > 0 || adaptiveVideoCandidates.length > 0;
-                            if (haveVideoCandidate && (audioCandidates.length > 0 || muxedCandidates.length > 0))
-                                break;
                         }
                         catch {
                             // Try the next client profile
                         }
                     }
-                    // Several Innertube profiles are refused by the CDN outright — the
-                    // audio-only DASH streams in particular require a PO token and answer
-                    // HTTP 403, which is what made every music download fail. Verify the
-                    // candidates with the same headers the download worker uses and keep
-                    // only a stream the CDN will actually serve.
-                    const chosenVideo = await this.firstServableStream([
-                        ...muxedCandidates,
-                        ...adaptiveVideoCandidates,
-                    ]);
-                    if (chosenVideo) {
-                        if (chosenVideo.muxed) {
-                            directVideoUrl = chosenVideo.url;
-                            videoResolution = videoResolution || chosenVideo.resolution;
-                            videoFps = videoFps || chosenVideo.fps;
-                        }
-                        else {
-                            adaptiveVideoUrl = chosenVideo.url;
-                            adaptiveVideoResolution = adaptiveVideoResolution || chosenVideo.resolution;
-                            adaptiveVideoFps = adaptiveVideoFps || chosenVideo.fps;
-                        }
+                    // All Innertube profiles have been tried. Rank and verify the pools
+                    // separately so the download can offer real quality: the highest
+                    // adaptive video stream (muxed with the audio track on download)
+                    // plus the low-resolution muxed stream as a guaranteed fallback.
+                    // Blindly taking the first servable candidate is what pinned every
+                    // YouTube download to the 360p muxed stream.
+                    //
+                    // Candidate counts are capped before the (sequential, network-bound)
+                    // servability probes so a pathological video cannot stretch analyze
+                    // into a minute-long request.
+                    bestMuxed = await this.firstServableStream(dedupeCandidates(muxedCandidates)
+                        .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))
+                        .slice(0, 3));
+                    bestAdaptive = await this.firstServableStream(dedupeCandidates(adaptiveVideoCandidates)
+                        .sort((a, b) => adaptiveScore(b) - adaptiveScore(a))
+                        .slice(0, 6));
+                    if (bestMuxed) {
+                        directVideoUrl = bestMuxed.url;
+                        videoResolution = videoResolution || bestMuxed.resolution;
+                        videoFps = videoFps || bestMuxed.fps;
                     }
-                    directAudioUrl = await this.firstServableAudioUrl(audioCandidates);
-                    // No servable audio-only stream: the audio extraction formats fall
-                    // back to the muxed stream (`directAudioUrl || directVideoUrl`), whose
-                    // audio is demuxed locally by ffmpeg.
+                    if (bestAdaptive) {
+                        adaptiveVideoUrl = bestAdaptive.url;
+                        adaptiveVideoResolution = adaptiveVideoResolution || bestAdaptive.resolution;
+                        adaptiveVideoFps = adaptiveVideoFps || bestAdaptive.fps;
+                    }
+                    directAudioUrl = await this.firstServableAudioUrl(dedupeUrls(audioCandidates).slice(0, 6));
                 }
             }
         }
@@ -245,84 +288,198 @@ export class YouTubeProvider {
             // yt-dlp's URLs are verified like any other: some of its formats are
             // served with the same first-bytes-only limitation, and offering one
             // would just move the 403 from the analyze step into the download job.
-            const ytDlpVideo = viaYtDlp.videoUrl
-                ? await this.firstServableStream([{ url: viaYtDlp.videoUrl, muxed: true }])
-                : undefined;
             const ytDlpAudio = viaYtDlp.audioUrl
                 ? await this.firstServableAudioUrl([viaYtDlp.audioUrl])
                 : undefined;
-            if (ytDlpVideo) {
+            const ytDlpVideo = viaYtDlp.videoUrl
+                ? await this.firstServableStream([{ url: viaYtDlp.videoUrl, muxed: !ytDlpAudio }])
+                : undefined;
+            if (ytDlpVideo && ytDlpAudio) {
+                // Video-only + audio pair: download as an adaptive mux pair so the
+                // result is not a silent video.
+                adaptiveVideoUrl = ytDlpVideo.url;
+                adaptiveVideoResolution = adaptiveVideoResolution || ytDlpVideo.resolution;
+                directAudioUrl = ytDlpAudio;
+            }
+            else if (ytDlpVideo) {
                 directVideoUrl = ytDlpVideo.url;
                 videoResolution = videoResolution || ytDlpVideo.resolution;
             }
-            if (ytDlpAudio)
+            else if (ytDlpAudio) {
                 directAudioUrl = ytDlpAudio;
+            }
             if (viaYtDlp.durationSec && !videoDurationSec)
                 videoDurationSec = viaYtDlp.durationSec;
             if (viaYtDlp.title && title === 'YouTube Media')
                 title = viaYtDlp.title;
             if (viaYtDlp.author && author === 'Unknown Creator')
                 author = viaYtDlp.author;
-            if (viaYtDlp.resolution && !videoResolution)
+            if (viaYtDlp.resolution && !videoResolution && !adaptiveVideoResolution) {
                 videoResolution = viaYtDlp.resolution;
+                adaptiveVideoResolution = adaptiveVideoResolution || viaYtDlp.resolution;
+            }
             if (viaYtDlp.error)
                 failureReason = failureReason || viaYtDlp.error;
         }
         if (!directVideoUrl && !adaptiveVideoUrl && !directAudioUrl) {
             console.warn(`[youtube] ${videoId}: no stream resolved — ${failureReason}`);
         }
-        const downloadAuthorized = !!(directVideoUrl || adaptiveVideoUrl || directAudioUrl);
+        // YouTube's CDN serves audio-only DASH streams for only their first ~2 MB
+        // from datacenter IPs (PO-token gated), so a full audio-only download is
+        // refused mid-stream. When no audio-only URL is usable, the combined
+        // muxed stream is the only fully downloadable source of audio — it becomes
+        // the muxing partner for the high-quality adaptive video, and the source
+        // for the audio export formats (ffmpeg demuxes its audio locally).
+        const adaptiveAudioSource = directAudioUrl || directVideoUrl;
+        // Progressive streams are throttled after ~23 MB (SAFE_PROGRESSIVE_BYTES).
+        // When the best progressive stream is larger than that — the common case
+        // for anything beyond a short clip — the download would fail part-way, so
+        // resolve the segmented HLS variants with yt-dlp instead: each segment is
+        // an independent URL and is not subject to the per-URL budget.
+        const bestAdaptiveSize = bestAdaptive?.contentLength || 0;
+        const bestMuxedSize = bestMuxed?.contentLength || 0;
+        const progressiveOversize = bestAdaptiveSize > SAFE_PROGRESSIVE_BYTES || bestMuxedSize > SAFE_PROGRESSIVE_BYTES;
+        const hasProgressive = !!(directVideoUrl || adaptiveVideoUrl);
+        let hlsVideoUrl;
+        let hlsAudioUrl;
+        let hlsResolution;
+        let hlsFps;
+        if (progressiveOversize || !hasProgressive) {
+            const hls = await this.ytDlpExtractHls(videoId, url);
+            if (hls.videoUrl) {
+                hlsVideoUrl = hls.videoUrl;
+                hlsAudioUrl = hls.audioUrl;
+                hlsResolution = hls.resolution;
+                hlsFps = hls.fps;
+                if (hls.error)
+                    failureReason = failureReason || hls.error;
+            }
+        }
+        const downloadAuthorized = !!(directVideoUrl || adaptiveVideoUrl || directAudioUrl || hlsVideoUrl);
         // The public stream URLs found above are only used when present; DRM
         // circumvention and unauthorized extraction are never performed.
-        const formats = [
-            ...(directVideoUrl || adaptiveVideoUrl
-                ? [
-                    {
-                        id: 'yt-video-1080p',
-                        type: 'video',
-                        format: 'mp4',
-                        qualityLabel: videoResolution
-                            ? `${videoResolution} MP4 (Direct Stream)`
-                            : adaptiveVideoResolution
-                                ? `${adaptiveVideoResolution} MP4 (Direct Stream, muxed with audio on download)`
-                                : 'MP4 (Direct Stream)',
-                        resolution: videoResolution || adaptiveVideoResolution,
-                        fps: videoFps || adaptiveVideoFps,
-                        directDownloadUrl: directVideoUrl || adaptiveVideoUrl,
-                        notes: directVideoUrl
-                            ? 'Publicly addressable muxed stream exposed by the player metadata.'
-                            : 'Adaptive stream; audio and video are muxed together when downloading.',
-                    },
-                ]
-                : [
-                    {
-                        id: 'yt-video-1080p',
-                        type: 'video',
-                        format: 'mp4',
-                        qualityLabel: '1080p Full HD',
-                        resolution: '1920x1080',
-                        fps: 30,
-                    },
-                ]),
-            {
+        const formats = [];
+        // 0) Best quality first when the platform throttles progressive streams:
+        //    the segmented HLS variant, downloaded by ffmpeg segment-by-segment.
+        if (hlsVideoUrl) {
+            formats.push({
+                id: 'yt-video-hls',
+                type: 'video',
+                format: 'mp4',
+                qualityLabel: `${hlsResolution || 'Best available'}${hlsFps ? `${hlsFps}` : ''} MP4 (HLS)`,
+                resolution: hlsResolution,
+                fps: hlsFps,
+                hlsVideoUrl,
+                hlsAudioUrl,
+                notes: 'Segmented stream — downloads in full quality even when the platform throttles single-URL streams.',
+            });
+        }
+        // 1) Best quality first: the highest adaptive video stream, muxed with an
+        //    audio track during download (the client sends videoUrl + audioUrl so
+        //    the server muxes them with ffmpeg).
+        if (adaptiveVideoUrl && adaptiveAudioSource && bestAdaptiveSize <= SAFE_PROGRESSIVE_BYTES) {
+            formats.push({
+                id: 'yt-video-adaptive',
+                type: 'video',
+                format: 'mp4',
+                qualityLabel: `${adaptiveVideoResolution || 'Best available'} MP4 (audio muxed)`,
+                resolution: adaptiveVideoResolution,
+                fps: adaptiveVideoFps,
+                directDownloadUrl: adaptiveVideoUrl,
+                videoUrl: adaptiveVideoUrl,
+                audioUrl: adaptiveAudioSource,
+                notes: directAudioUrl
+                    ? 'Highest-quality stream the platform exposed. Audio is muxed in during download, so the file plays with sound.'
+                    : 'Highest-quality video stream. YouTube only serves the first ~2 MB of audio-only streams to servers, so the audio track is taken from the combined standard stream and muxed in during download.',
+            });
+        }
+        // 1b) Adaptive video with no muxable audio at all — offer it, but say so
+        //     loudly: a silent file surprises users otherwise.
+        if (adaptiveVideoUrl && !adaptiveAudioSource) {
+            formats.push({
+                id: 'yt-video-adaptive',
+                type: 'video',
+                format: 'mp4',
+                qualityLabel: `${adaptiveVideoResolution || 'Adaptive'} MP4 (video only)`,
+                resolution: adaptiveVideoResolution,
+                fps: adaptiveVideoFps,
+                directDownloadUrl: adaptiveVideoUrl,
+                videoUrl: adaptiveVideoUrl,
+                notes: 'The platform did not expose any usable audio track for this video — the download will have no sound.',
+            });
+        }
+        // 2) Muxed fallback: a single stream that already carries audio.
+        if (directVideoUrl && (bestMuxedSize === 0 || bestMuxedSize <= SAFE_PROGRESSIVE_BYTES)) {
+            formats.push({
+                id: 'yt-video-muxed',
+                type: 'video',
+                format: 'mp4',
+                qualityLabel: `${videoResolution || 'MP4'} (Direct Stream)`,
+                resolution: videoResolution,
+                fps: videoFps,
+                directDownloadUrl: directVideoUrl,
+                notes: 'Single combined stream with audio — no muxing needed, lower resolution.',
+            });
+        }
+        if (formats.length === 0) {
+            formats.push({
+                id: 'yt-video-1080p',
+                type: 'video',
+                format: 'mp4',
+                qualityLabel: '1080p Full HD',
+                resolution: '1920x1080',
+                fps: 30,
+            });
+        }
+        // Audio exports: the audio-only stream when the CDN serves it fully,
+        // otherwise the muxed stream whose audio track ffmpeg extracts locally,
+        // otherwise the segmented HLS audio variant.
+        const audioSource = adaptiveAudioSource;
+        const audioSourceOversize = !directAudioUrl && bestMuxedSize > SAFE_PROGRESSIVE_BYTES;
+        if (hlsAudioUrl && (!audioSource || audioSourceOversize)) {
+            formats.push({
                 id: 'yt-audio-mp3',
                 type: 'audio',
                 format: 'mp3',
                 qualityLabel: '320 kbps (High Export)',
                 bitrateKbps: 320,
-                directDownloadUrl: directAudioUrl || directVideoUrl,
-                notes: 'Output will be encoded at 320 kbps CBR. Does not restore audio lost in source.',
-            },
-            {
+                hlsAudioUrl,
+                notes: 'Extracted from the segmented audio stream; encoded at 320 kbps CBR.',
+            });
+            formats.push({
                 id: 'yt-audio-m4a',
                 type: 'audio',
                 format: 'm4a',
                 qualityLabel: 'Original Audio Container (AAC/M4A)',
                 isLossless: false,
-                directDownloadUrl: directAudioUrl || directVideoUrl,
-                notes: 'Direct stream extraction without generational loss when supported.',
-            },
-        ];
+                hlsAudioUrl,
+                notes: 'Segmented audio stream copied without generational loss.',
+            });
+        }
+        else if (audioSource) {
+            formats.push({
+                id: 'yt-audio-mp3',
+                type: 'audio',
+                format: 'mp3',
+                qualityLabel: '320 kbps (High Export)',
+                bitrateKbps: 320,
+                directDownloadUrl: audioSource,
+                notes: directAudioUrl
+                    ? 'Extracted from the original audio-only stream; encoded at 320 kbps CBR.'
+                    : 'Audio-only stream unavailable — extracted from the muxed video stream; encoded at 320 kbps CBR.',
+            });
+            formats.push({
+                id: 'yt-audio-m4a',
+                type: 'audio',
+                format: 'm4a',
+                qualityLabel: 'Original Audio Container (AAC/M4A)',
+                isLossless: false,
+                directDownloadUrl: audioSource,
+                notes: directAudioUrl
+                    ? 'Direct stream extraction without generational loss.'
+                    : 'Audio-only stream unavailable — extracted from the muxed video stream without generational loss.',
+            });
+        }
         return {
             sourceUrl: url,
             platform: 'youtube',
@@ -337,9 +494,9 @@ export class YouTubeProvider {
                 : `This media cannot be downloaded through this tool because the platform did not expose an authorized download method for it right now${failureReason ? ` — ${failureReason}` : ' (blocked, age-restricted, or requires sign-in)'}. If the video is your own or age-gated, add a cookies.txt from a logged-in session (set YT_COOKIES_FILE, default /etc/secrets/cookies.txt) and retry.`,
             copyrightNotice: 'This tool respects content rights. Use only for content you own or where an authorized download is provided.',
             availableFormats: formats,
-            rawSourceUrl: directVideoUrl || adaptiveVideoUrl,
+            rawSourceUrl: adaptiveVideoUrl || directVideoUrl,
             rawMuxedUrl: directVideoUrl,
-            rawVideoUrl: directVideoUrl || adaptiveVideoUrl,
+            rawVideoUrl: adaptiveVideoUrl,
             rawAudioUrl: directAudioUrl,
         };
     }
@@ -444,8 +601,8 @@ export class YouTubeProvider {
      * fall through to its own messaging.
      */
     async ytDlpExtractMedia(videoId, watchUrl) {
-        const ytdlp = findYtDlp();
-        if (!ytdlp) {
+        const invocation = await findYtDlpInvocation();
+        if (!invocation) {
             return { error: 'yt-dlp is not installed on the server (set YT_DLP_PATH or install it)' };
         }
         // Use the configured session cookie file when one exists (copied to
@@ -454,6 +611,7 @@ export class YouTubeProvider {
         const jar = configuredCookies || tempCookieJar();
         try {
             const args = [
+                ...invocation.prefixArgs,
                 '--no-warnings',
                 '--dump-single-json',
                 '--no-playlist',
@@ -463,7 +621,7 @@ export class YouTubeProvider {
                 YTDLP_UA,
                 `https://www.youtube.com/watch?v=${videoId}`,
             ];
-            const { stdout } = await execFileAsync(ytdlp, args, {
+            const { stdout } = await execFileAsync(invocation.command, args, {
                 timeout: 90_000,
                 maxBuffer: 64 * 1024 * 1024,
             });
@@ -514,6 +672,97 @@ export class YouTubeProvider {
         }
         finally {
             // Never delete a session cookie file the operator mounted.
+            if (!configuredCookies) {
+                try {
+                    fs.unlinkSync(jar);
+                }
+                catch { }
+            }
+        }
+    }
+    /**
+     * Extract the segmented (HLS) variants with yt-dlp.
+     *
+     * Single-URL googlevideo streams are throttled after ~23 MB from datacenter
+     * IPs, which makes any long or HD download fail part-way. HLS manifests are
+     * fetched segment-by-segment — every segment is its own URL — so they are
+     * immune to the per-URL budget and are the only way to deliver full-quality
+     * files from a throttled server. Returns an empty result (with an `error`
+     * note) when yt-dlp is unavailable or offers no HLS variants.
+     */
+    async ytDlpExtractHls(videoId, watchUrl) {
+        const invocation = await findYtDlpInvocation();
+        if (!invocation) {
+            return { error: 'yt-dlp is not installed on the server (set YT_DLP_PATH or install it)' };
+        }
+        const configuredCookies = findCookiesFile();
+        const jar = configuredCookies || tempCookieJar();
+        try {
+            const args = [
+                ...invocation.prefixArgs,
+                '--no-warnings',
+                '--dump-single-json',
+                '--no-playlist',
+                '--cookies',
+                jar,
+                '--user-agent',
+                YTDLP_UA,
+                `https://www.youtube.com/watch?v=${videoId}`,
+            ];
+            const { stdout } = await execFileAsync(invocation.command, args, {
+                timeout: 90_000,
+                maxBuffer: 64 * 1024 * 1024,
+            });
+            const json = JSON.parse(stdout.toString());
+            const isHls = (f) => f?.protocol === 'm3u8' ||
+                f?.protocol === 'm3u8_native' ||
+                /hls_playlist|manifest\.googlevideo/i.test(`${f?.url || ''}`);
+            if (!isHls)
+                return {};
+            const hlsFormats = (json?.formats || []).filter((f) => f?.url && isHls(f));
+            // HLS audio variants report `vcodec: 'none'` with `acodec` often absent
+            // entirely (None), so the check must treat a missing codec as audio.
+            const isVideoHls = (f) => !!f.vcodec && f.vcodec !== 'none';
+            const isAudioHls = (f) => f.vcodec === 'none';
+            const hlsVideos = hlsFormats
+                .filter((f) => isVideoHls(f) && (f.height || 0) <= 1080)
+                // H.264 first (plays everywhere), then height, then fps.
+                .sort((a, b) => (Number(/avc1|h264/i.test(`${b.vcodec}`)) - Number(/avc1|h264/i.test(`${a.vcodec}`))) * 1e9 +
+                ((b.height || 0) - (a.height || 0)) * 1e4 +
+                ((b.fps || 0) - (a.fps || 0)));
+            const hlsAudios = hlsFormats
+                .filter(isAudioHls)
+                .sort((a, b) => (b.tbr || b.abr || 0) - (a.tbr || a.abr || 0) ||
+                (Number(b.format_id) || 0) - (Number(a.format_id) || 0));
+            const bestVideo = hlsVideos[0];
+            const bestAudio = hlsAudios[0];
+            if (!bestVideo && !bestAudio)
+                return {};
+            const result = {};
+            if (bestVideo) {
+                result.videoUrl = bestVideo.url;
+                if (bestVideo.height)
+                    result.resolution = `${bestVideo.height}p`;
+                if (bestVideo.fps)
+                    result.fps = Number(bestVideo.fps) || undefined;
+            }
+            if (bestAudio) {
+                result.audioUrl = bestAudio.url;
+            }
+            for (const u of [result.videoUrl, result.audioUrl]) {
+                if (!u)
+                    continue;
+                rememberStreamCredentials(u, {
+                    userAgent: YTDLP_UA,
+                    referer: watchUrl,
+                });
+            }
+            return result;
+        }
+        catch (err) {
+            return { error: `yt-dlp HLS extraction failed: ${err.message}` };
+        }
+        finally {
             if (!configuredCookies) {
                 try {
                     fs.unlinkSync(jar);

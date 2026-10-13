@@ -4,11 +4,11 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { rememberStreamCredentials, getStreamCredentials } from '../StreamCredentials.js';
-import { findYtDlp, readCookieJarHeader } from '../../utils/ytDlp.js';
+import { findYtDlpInvocation, readCookieJarHeader } from '../../utils/ytDlp.js';
 import { findCookiesFile } from '../../utils/cookies.js';
 import { fetchWithRetry } from '../../utils/httpFetch.js';
 import { RateLimitedError } from '../../utils/errors.js';
-export { findYtDlp };
+export { findYtDlpInvocation };
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 /** TikTok serves the desktop anti-bot challenge to desktop browsers; the
  *  phone user agent still receives fully server-rendered video pages. */
@@ -917,15 +917,15 @@ export class TikTokProvider {
      * CDN answers HTTP 403.
      */
     async ytDlpExtractMedia(url) {
-        const ytdlp = findYtDlp();
-        if (!ytdlp)
+        const invocation = await findYtDlpInvocation();
+        if (!invocation)
             return undefined;
         const userCookies = findCookiesFile();
         const jar = userCookies || path.join(os.tmpdir(), `tt-ytdlp-${process.pid}-${Date.now()}.cookies.txt`);
         try {
-            const args = ['--no-warnings', '--dump-single-json', '--no-playlist', '--cookies', jar];
+            const args = [...invocation.prefixArgs, '--no-warnings', '--dump-single-json', '--no-playlist', '--cookies', jar];
             args.push(url);
-            const { stdout } = await execFileAsync(ytdlp, args, {
+            const { stdout } = await execFileAsync(invocation.command, args, {
                 timeout: 90000,
                 maxBuffer: 64 * 1024 * 1024,
             });
@@ -986,15 +986,15 @@ export class TikTokProvider {
     }
     async ytDlpProfileVideos(url, author) {
         try {
-            const ytdlp = findYtDlp();
-            if (!ytdlp)
+            const invocation = await findYtDlpInvocation();
+            if (!invocation)
                 return [];
             const cookies = findCookiesFile();
-            const args = ['--flat-playlist', '--dump-json', '--no-warnings', '--playlist-end', '50'];
+            const args = [...invocation.prefixArgs, '--flat-playlist', '--dump-json', '--no-warnings', '--playlist-end', '50'];
             if (cookies)
                 args.push('--cookies', cookies);
             args.push(url);
-            const { stdout } = await execFileAsync(ytdlp, args, {
+            const { stdout } = await execFileAsync(invocation.command, args, {
                 timeout: 120000,
                 maxBuffer: 64 * 1024 * 1024,
             });

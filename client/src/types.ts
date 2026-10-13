@@ -159,6 +159,13 @@ export interface MediaFormatOption {
   filesizeEstimateBytes?: number;
   isLossless?: boolean;
   directDownloadUrl?: string;
+  /** Adaptive video-only stream URL (muxed with audioUrl server-side when set). */
+  videoUrl?: string;
+  /** Adaptive audio-only stream URL — the muxing partner of videoUrl. */
+  audioUrl?: string;
+  /** Segmented HLS manifest URLs — downloaded via ffmpeg when set. */
+  hlsVideoUrl?: string;
+  hlsAudioUrl?: string;
   notes?: string;
 }
 
@@ -272,6 +279,7 @@ export interface WatermarkRegion {
 
 export type AppNavSection =
   | 'studio-optimize'
+  | 'font-studio'
   | 'media-hub'
   | 'media-video-to-music'
   | 'media-youtube'

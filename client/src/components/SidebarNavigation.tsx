@@ -13,6 +13,7 @@ import {
   Settings,
   Grid,
   Box,
+  Type,
 } from 'lucide-react';
 import type { AppNavSection } from '../types';
 
@@ -44,6 +45,12 @@ export const SidebarNavigation: React.FC<SidebarNavigationProps> = ({
           label: 'Optimize Video',
           icon: Sparkles,
           accent: 'text-violet-400',
+        },
+        {
+          id: 'font-studio' as AppNavSection,
+          label: 'Font Studio',
+          icon: Type,
+          accent: 'text-cyan-400',
         },
       ],
     },

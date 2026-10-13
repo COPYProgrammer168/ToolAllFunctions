@@ -295,6 +295,9 @@ export async function startMediaDownload(params: {
   videoUrl?: string;
   /** Matching audio-only URL, used together with videoUrl. */
   audioUrl?: string;
+  /** Segmented HLS manifest URLs (streamed with ffmpeg server-side). */
+  hlsVideoUrl?: string;
+  hlsAudioUrl?: string;
 }): Promise<{ jobId: string; status: string; filename: string }> {
   const res = await fetch('/api/media/download', {
     method: 'POST',
