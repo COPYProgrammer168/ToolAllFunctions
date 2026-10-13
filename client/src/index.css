@@ -45,38 +45,7 @@ h1, h2, h3, h4, .font-display {
    index.html; these local families are personal-use/demo licensed — see
    src/assets/fonts/FONT-LICENSES.md for full attribution).
    ═══════════════════════════════════════════════════════════════════════════ */
-
-@font-face { font-family: 'Astron Valley'; src: url('./assets/fonts/astron-valley.ttf') format('truetype'); font-display: swap; }
-@font-face { font-family: 'Aetherin'; src: url('./assets/fonts/aetherin.otf') format('opentype'); font-display: swap; }
-@font-face { font-family: 'Barkmo'; src: url('./assets/fonts/barkmo.otf') format('opentype'); font-display: swap; }
-@font-face { font-family: 'Byte Sharp'; src: url('./assets/fonts/byte-sharp.otf') format('opentype'); font-display: swap; }
-@font-face { font-family: 'Chorus'; src: url('./assets/fonts/chorus-bold.otf') format('opentype'); font-display: swap; }
-@font-face { font-family: 'Chrome Quantum'; src: url('./assets/fonts/chrome-quantum.otf') format('opentype'); font-display: swap; }
-@font-face { font-family: 'Digital Divide'; src: url('./assets/fonts/digital-divide.otf') format('opentype'); font-display: swap; }
-@font-face { font-family: 'Digitalize'; src: url('./assets/fonts/digitalize.otf') format('opentype'); font-display: swap; }
-@font-face { font-family: 'Djingo'; src: url('./assets/fonts/djingo.otf') format('opentype'); font-display: swap; }
-@font-face { font-family: 'Dronez'; src: url('./assets/fonts/dronez.ttf') format('truetype'); font-display: swap; }
-@font-face { font-family: 'Fogarde'; src: url('./assets/fonts/fogarde.otf') format('opentype'); font-display: swap; }
-@font-face { font-family: 'Gorez'; src: url('./assets/fonts/gorez.ttf') format('truetype'); font-display: swap; }
-@font-face { font-family: 'Megatrox'; src: url('./assets/fonts/megatrox.otf') format('opentype'); font-display: swap; }
-@font-face { font-family: 'Movement'; src: url('./assets/fonts/movement.ttf') format('truetype'); font-display: swap; }
-@font-face { font-family: 'Nero Force'; src: url('./assets/fonts/nero-force.otf') format('opentype'); font-display: swap; }
-@font-face { font-family: 'Newton Howard'; src: url('./assets/fonts/newton-howard.ttf') format('truetype'); font-display: swap; }
-@font-face { font-family: 'Ofform'; src: url('./assets/fonts/ofform.otf') format('opentype'); font-display: swap; }
-@font-face { font-family: 'PTG Futurizm'; src: url('./assets/fonts/ptg-futurizm.otf') format('opentype'); font-display: swap; }
-@font-face { font-family: 'Radiant Pafista'; src: url('./assets/fonts/radiant-pafista.ttf') format('truetype'); font-display: swap; }
-@font-face { font-family: 'Saint Carell'; src: url('./assets/fonts/saint-carell.otf') format('opentype'); font-display: swap; }
-@font-face { font-family: 'Seabox'; src: url('./assets/fonts/seabox.ttf') format('truetype'); font-display: swap; }
-@font-face { font-family: 'Siegra'; src: url('./assets/fonts/siegra.otf') format('opentype'); font-display: swap; }
-@font-face { font-family: 'Space Broke'; src: url('./assets/fonts/space-broke.otf') format('opentype'); font-display: swap; }
-@font-face { font-family: 'The King'; src: url('./assets/fonts/the-king.ttf') format('truetype'); font-display: swap; }
-@font-face { font-family: 'Transonite'; src: url('./assets/fonts/transonite.otf') format('opentype'); font-display: swap; }
-@font-face { font-family: 'Universa'; src: url('./assets/fonts/universa.otf') format('opentype'); font-display: swap; }
-@font-face { font-family: 'Wildtras'; src: url('./assets/fonts/wildtras.otf') format('opentype'); font-display: swap; }
-@font-face { font-family: 'Womes'; src: url('./assets/fonts/womes.ttf') format('truetype'); font-display: swap; }
-@font-face { font-family: 'Xylver'; src: url('./assets/fonts/xylver.otf') format('opentype'); font-display: swap; }
-@font-face { font-family: 'Zephyrus'; src: url('./assets/fonts/zephyrus.ttf') format('truetype'); font-display: swap; }
-
+   
 /* ─── Typography & Accents ─── */
 .text-gradient {
   @apply bg-gradient-to-r from-white via-neutral-300 to-neutral-500 bg-clip-text text-transparent;
