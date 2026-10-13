@@ -5,6 +5,7 @@ import {
   Copy,
   Heart,
   ImageDown,
+  ImagePlus,
   RotateCcw,
   Search,
   Sparkles,
@@ -12,7 +13,7 @@ import {
   Type,
   X,
 } from 'lucide-react';
-import { FONT_STYLES, FONT_STYLE_CATEGORIES } from '../services/fontStyleCatalog';
+import { FONT_STYLES, FONT_STYLE_CATEGORIES, NICKNAME_STYLES } from '../services/fontStyleCatalog';
 import {
   FontStyleEngine,
   TextTransformationRepository,
@@ -24,12 +25,14 @@ import {
   saveRecents,
 } from '../services/fontStyleEngine';
 import { DECORATIONS, SEPARATORS } from '../services/unicodeAlphabets';
+import type { UnicodeStyleId } from '../services/unicodeStyleEngine';
 import { downloadPng, renderTextToPng } from '../services/textPngExporter';
 import type {
   CapitalizationMode,
   FontStyleCategoryFilter,
   FontStyleResult,
   OutputKind,
+  TransformOptions,
 } from '../services/fontStyleTypes';
 
 /* ── View-model (state + actions, kept out of the render tree) ──────────── */
@@ -41,15 +44,39 @@ const engine = new FontStyleEngine(FONT_STYLES);
 const repository = new TextTransformationRepository(engine);
 const styleById = new Map(FONT_STYLES.map((s) => [s.id, s]));
 
-/** Clipboard write with a graceful fallback for non-secure contexts. */
-async function writeClipboard(text: string): Promise<boolean> {
+/**
+ * Copy a rendered PNG straight to the clipboard so the styled text can be
+ * pasted as an image into chats, documents, design tools, etc.
+ * Requires a secure context (localhost/HTTPS) and a browser with
+ * ClipboardItem; returns false when unavailable so callers can fall back.
+ */
+async function copyImageToClipboard(blob: Blob): Promise<boolean> {
+  try {
+    if (typeof ClipboardItem !== 'undefined' && navigator.clipboard?.write) {
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+      return true;
+    }
+  } catch {
+    /* clipboard blocked or unsupported */
+  }
+  return false;
+}
+
+/**
+ * Copy real Unicode-styled text to the clipboard.
+ *
+ * Discord nicknames (and every other plain-text surface) accept the
+ * styled characters directly — no font needed. Uses the async clipboard
+ * API with a textarea + execCommand fallback for non-secure contexts.
+ */
+async function copyStyledText(text: string): Promise<boolean> {
   try {
     if (navigator.clipboard?.writeText) {
       await navigator.clipboard.writeText(text);
       return true;
     }
   } catch {
-    /* fall through to legacy path */
+    /* fall through to the legacy path */
   }
   try {
     const textarea = document.createElement('textarea');
@@ -91,6 +118,15 @@ function useDebouncedValue<T>(value: T, delay: number): T {
   return debounced;
 }
 
+/** Results rendered per page — keeps the grid light on low-end devices. */
+const RESULTS_PAGE_SIZE = 24;
+
+/** Discord nickname limit, counted in code points. */
+const NICKNAME_LIMIT = 32;
+
+/** Engine over the nickname styles — powers the per-card style override. */
+const nicknameEngine = new FontStyleEngine(NICKNAME_STYLES);
+
 /* ── Component ──────────────────────────────────────────────────────────── */
 
 export const FontStudioView: React.FC = () => {
@@ -107,6 +143,9 @@ export const FontStudioView: React.FC = () => {
   const [separatorId, setSeparatorId] = useState('none');
   const [favorites, setFavorites] = useState<string[]>(() => loadFavorites(storage));
   const [recents, setRecents] = useState(() => loadRecents(storage));
+  const [visibleCount, setVisibleCount] = useState(RESULTS_PAGE_SIZE);
+  /** Per-card Unicode style overrides, keyed by card id ('' = card default). */
+  const [styleOverrides, setStyleOverrides] = useState<Record<string, UnicodeStyleId | ''>>({});
   const [toast, setToast] = useState<string | null>(null);
   const toastTimer = useRef<number | undefined>(undefined);
 
@@ -117,6 +156,11 @@ export const FontStudioView: React.FC = () => {
   }, []);
 
   useEffect(() => () => window.clearTimeout(toastTimer.current), []);
+
+  // A new filter/search resets paging to the first page of results.
+  useEffect(() => {
+    setVisibleCount(RESULTS_PAGE_SIZE);
+  }, [category, search, favoritesOnly, sort]);
 
   const codePointCount = useMemo(() => [...inputText].length, [inputText]);
   const overLimit = codePointCount > MAX_CHARACTER_COUNT;
@@ -133,26 +177,29 @@ export const FontStudioView: React.FC = () => {
   const generation = useMemo<{ results: FontStyleResult[]; failed: boolean }>(() => {
     if (!previewTrimmed || previewOverLimit) return { results: [], failed: false };
     try {
-      return {
-        results: repository.generate(
-          previewText,
-          { capitalization, letterSpacing, decorationId, separatorId },
-          {
-            category,
-            search,
-            favoriteIds: favorites,
-            favoritesOnly,
-            sort,
-            recentIds: recents.map((r) => r.styleId),
-          }
-        ),
-        failed: false,
-      };
+      const options: TransformOptions = { capitalization, letterSpacing, decorationId, separatorId };
+      const base = repository.generate(previewText, options, {
+        category,
+        search,
+        favoriteIds: favorites,
+        favoritesOnly,
+        sort,
+        recentIds: recents.map((r) => r.styleId),
+      });
+      // Apply per-card style overrides on top of each card's default style.
+      const results = base.map((r) => {
+        const override = styleOverrides[r.styleId];
+        if (!override || override === r.defaultStyleId) return r;
+        const style = nicknameEngine.getStyle(override);
+        if (!style) return r;
+        return { ...r, output: nicknameEngine.transform(r.sourceText, style, options) };
+      });
+      return { results, failed: false };
     } catch (err) {
       console.error('Font Studio generation failed', err);
       return { results: [], failed: true };
     }
-  }, [previewText, previewTrimmed, previewOverLimit, capitalization, letterSpacing, decorationId, separatorId, category, search, favorites, favoritesOnly, sort, recents]);
+  }, [previewText, previewTrimmed, previewOverLimit, capitalization, letterSpacing, decorationId, separatorId, category, search, favorites, favoritesOnly, sort, recents, styleOverrides]);
 
   const status: StudioStatus = generation.failed
     ? 'error'
@@ -174,34 +221,30 @@ export const FontStudioView: React.FC = () => {
 
   const handleCopy = useCallback(
     async (result: FontStyleResult) => {
-      const ok = await writeClipboard(result.output);
+      // Every card copies real Unicode text — it keeps its look in Discord
+      // nicknames and anywhere else plain text survives.
+      const ok = await copyStyledText(result.output);
       if (!ok) {
         showToast('Clipboard blocked by the browser');
         return;
       }
       recordUsage(result.styleId);
-      if (result.outputKind === 'font-preview') {
-        // Honest messaging: the font itself is not part of copied text.
-        showToast(`Copied plain text — font not included (use PNG for ${result.styleName})`);
-      } else {
-        showToast(`Copied “${result.styleName}”`);
-      }
+      showToast('Copied styled text. Paste it into your Discord nickname.');
     },
     [recordUsage, showToast]
   );
 
   const handleCopyAll = useCallback(async () => {
-    const payload = repository.formatCopyAll(results, { unicodeOnly: true });
-    if (!payload) {
+    if (!results.length) {
       showToast('Nothing copyable to copy');
       return;
     }
-    const ok = await writeClipboard(payload);
+    const ok = await copyStyledText(repository.formatCopyAll(results));
     if (!ok) {
       showToast('Clipboard blocked by the browser');
       return;
     }
-    showToast(`Copied ${payload.split('\n').length} Unicode styles`);
+    showToast(`Copied ${results.length} styled texts — paste any of them into Discord`);
   }, [results, showToast]);
 
   const handlePaste = useCallback(async () => {
@@ -232,6 +275,7 @@ export const FontStudioView: React.FC = () => {
     setLetterSpacing(0);
     setDecorationId('none');
     setSeparatorId('none');
+    setStyleOverrides({});
     setInputText('');
   }, []);
 
@@ -243,11 +287,45 @@ export const FontStudioView: React.FC = () => {
     });
   }, [storage]);
 
+  /** Override the Unicode style used for one card ('' restores its default). */
+  const handleStyleChange = useCallback((cardId: string, styleId: UnicodeStyleId | '') => {
+    setStyleOverrides((prev) => {
+      const next = { ...prev };
+      if (styleId) next[cardId] = styleId;
+      else delete next[cardId];
+      return next;
+    });
+  }, []);
+
+  const handleCopyImage = useCallback(
+    async (result: FontStyleResult) => {
+      const family = result.fontFamily ?? 'sans-serif';
+      try {
+        // Image/PNG keep the card's visual font look by rendering the
+        // source text in that font — the Unicode text stays for copying.
+        const rendered = await renderTextToPng(result.sourceText, { fontFamily: family });
+        const copied = await copyImageToClipboard(rendered.blob);
+        if (copied) {
+          recordUsage(result.styleId);
+          showToast(`Copied “${result.styleName}” as an image — paste it anywhere`);
+        } else {
+          // Nothing is lost: download the PNG when the image
+          // clipboard is unavailable (non-secure context / older browser).
+          downloadPng(rendered, result.styleName);
+          showToast(`Image clipboard blocked — PNG downloaded for “${result.styleName}”`);
+        }
+      } catch (err: any) {
+        showToast(err?.message || 'Image copy failed');
+      }
+    },
+    [recordUsage, showToast]
+  );
+
   const handlePngExport = useCallback(
     async (result: FontStyleResult) => {
       const family = result.fontFamily ?? 'sans-serif';
       try {
-        const rendered = await renderTextToPng(result.output, { fontFamily: family });
+        const rendered = await renderTextToPng(result.sourceText, { fontFamily: family });
         downloadPng(rendered, result.styleName);
         showToast(`PNG exported for “${result.styleName}”`);
       } catch (err: any) {
@@ -259,7 +337,8 @@ export const FontStudioView: React.FC = () => {
 
   const resetDefaults = () => handleResetControls();
 
-  const copyableCount = results.filter((r) => r.outputKind === 'unicode').length;
+  // Every card copies real Unicode text now, so everything is copyable.
+  const copyableCount = results.length;
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
@@ -272,8 +351,8 @@ export const FontStudioView: React.FC = () => {
         <h2 className="text-2xl sm:text-3xl font-extrabold text-cyan-300">Font Studio · Text Forge</h2>
         <p className="text-xs sm:text-sm text-neutral-400 max-w-2xl mx-auto">
           Turn any text into sci-fi, cyberpunk, gothic, medieval and gaming styles. Everything runs offline in
-          your browser — nothing is uploaded. Unicode styles are real copyable text; font previews can be
-          exported as transparent PNGs.
+          your browser — nothing is uploaded. Copy gives you real Unicode-styled text that works in a Discord
+          nickname; font cards also export their visual look as a PNG image.
         </p>
       </div>
 
@@ -502,17 +581,32 @@ export const FontStudioView: React.FC = () => {
       )}
 
       {status === 'ready' && results.length > 0 && (
-        <section className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4" aria-label="Generated styles">
-          {results.map((result) => (
-            <FontStyleCard
-              key={result.styleId}
-              result={result}
-              isFavorite={favorites.includes(result.styleId)}
-              onCopy={() => handleCopy(result)}
-              onToggleFavorite={() => toggleFavorite(result.styleId)}
-              onExportPng={() => handlePngExport(result)}
-            />
-          ))}
+        <section className="space-y-4" aria-label="Generated styles">
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+            {results.slice(0, visibleCount).map((result) => (
+              <FontStyleCard
+                key={result.styleId}
+                result={result}
+                isFavorite={favorites.includes(result.styleId)}
+                styleId={styleOverrides[result.styleId] ?? result.defaultStyleId ?? ''}
+                onStyleChange={handleStyleChange}
+                onCopy={() => handleCopy(result)}
+                onCopyImage={() => handleCopyImage(result)}
+                onToggleFavorite={() => toggleFavorite(result.styleId)}
+                onExportPng={() => handlePngExport(result)}
+              />
+            ))}
+          </div>
+          {results.length > visibleCount && (
+            <div className="flex justify-center">
+              <button
+                onClick={() => setVisibleCount((n) => n + RESULTS_PAGE_SIZE)}
+                className="px-4 py-2.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-semibold text-neutral-200 transition-all"
+              >
+                Show more styles ({results.length - visibleCount} remaining)
+              </button>
+            </div>
+          )}
         </section>
       )}
 
@@ -561,10 +655,12 @@ export const FontStudioView: React.FC = () => {
 
       {/* ── Licensing & honesty footer ── */}
       <p className="text-[10px] text-neutral-600 text-center max-w-2xl mx-auto leading-relaxed">
-        Font previews use Orbitron, Audiowide, UnifrakturMaguntia, Pirata One, Press Start 2P, Cinzel and Share
-        Tech Mono — all licensed under the SIL Open Font License 1.1. Copying a font preview copies plain text
-        only; use “PNG” to keep the visual font. Unicode transformations use only characters defined by the
-        Unicode Standard.
+        Google preview fonts (Orbitron, Audiowide, UnifrakturMaguntia, Pirata One, Press Start 2P, Cinzel,
+        Share Tech Mono) are SIL OFL 1.1 licensed. Bundled display families (Astron Valley, Megatrox, Xylver,
+        The King, …) are personal-use/demo licensed — see <code className="text-neutral-500">src/assets/fonts/FONT-LICENSES.md</code>.
+        “Copy” copies real Unicode-styled text that survives in Discord nicknames and every other plain-text
+        surface; “Image” copies a rendered PNG of the font look you can paste anywhere; “PNG” downloads it as
+        a file. Unicode transformations use only characters defined by the Unicode Standard.
       </p>
     </div>
   );
@@ -575,7 +671,11 @@ export const FontStudioView: React.FC = () => {
 interface FontStyleCardProps {
   result: FontStyleResult;
   isFavorite: boolean;
+  /** Effective Unicode style id (per-card override, else the card default). */
+  styleId: UnicodeStyleId | '';
+  onStyleChange: (cardId: string, styleId: UnicodeStyleId | '') => void;
   onCopy: () => void;
+  onCopyImage: () => void;
   onToggleFavorite: () => void;
   onExportPng: () => void;
 }
@@ -583,12 +683,16 @@ interface FontStyleCardProps {
 const kindBadge = (kind: OutputKind) =>
   kind === 'unicode'
     ? { label: 'Unicode · copyable', className: 'text-cyan-300 bg-cyan-500/10 border-cyan-500/30' }
-    : { label: 'Font preview · PNG export', className: 'text-violet-300 bg-violet-500/10 border-violet-500/30' };
+    : { label: 'Unicode + font image', className: 'text-violet-300 bg-violet-500/10 border-violet-500/30' };
 
 /** Memoized: only cards whose inputs changed re-render when results update. */
 const FontStyleCard: React.FC<FontStyleCardProps> = React.memo(
-  ({ result, isFavorite, onCopy, onToggleFavorite, onExportPng }) => {
+  ({ result, isFavorite, styleId, onStyleChange, onCopy, onCopyImage, onToggleFavorite, onExportPng }) => {
     const badge = kindBadge(result.outputKind);
+    // Styled text can eat more of Discord's limit than plain letters,
+    // so the counter measures the converted string, not the input.
+    const nicknameLength = [...result.output].length;
+    const overNicknameLimit = nicknameLength > NICKNAME_LIMIT;
 
     return (
       <article className="glass-panel rounded-2xl border border-white/[0.08] p-4 flex flex-col gap-3 hover:border-white/20 transition-all">
@@ -613,30 +717,72 @@ const FontStyleCard: React.FC<FontStyleCardProps> = React.memo(
           </button>
         </header>
 
-        <p
-          className="text-lg leading-relaxed text-neutral-100 break-words min-h-[2rem]"
-          style={result.fontFamily ? { fontFamily: result.fontFamily } : undefined}
-        >
+        {/* Preview is deliberately a plain system font: what you see here
+            is character-for-character what Copy puts on the clipboard. */}
+        <p className="text-lg leading-relaxed text-neutral-100 break-words min-h-[2rem]">
           {result.output || <span className="text-neutral-600 text-sm">(empty output)</span>}
         </p>
 
-        <footer className="flex items-center gap-2 pt-1 border-t border-white/5">
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <span className={`text-[11px] font-mono ${overNicknameLimit ? 'text-rose-400' : 'text-neutral-500'}`}>
+            {nicknameLength} / {NICKNAME_LIMIT} nickname chars
+          </span>
+          {overNicknameLimit && (
+            <span className="text-[11px] font-semibold text-amber-400">
+              Over Discord's {NICKNAME_LIMIT}-character nickname limit
+            </span>
+          )}
+        </div>
+
+        <div>
+          <label
+            htmlFor={`style-${result.styleId}`}
+            className="block text-[10px] font-bold uppercase tracking-wider text-neutral-500 mb-1.5"
+          >
+            Unicode style
+          </label>
+          <select
+            id={`style-${result.styleId}`}
+            value={styleId}
+            onChange={(e) => onStyleChange(result.styleId, e.target.value as UnicodeStyleId | '')}
+            className="w-full bg-black/40 border border-white/10 rounded-xl px-2.5 py-1.5 text-[11px] text-neutral-200 focus:outline-none focus:border-cyan-500/50"
+          >
+            {!result.defaultStyleId && <option value="">Card default (no override)</option>}
+            {NICKNAME_STYLES.map((s) => (
+              <option key={s.id} value={s.id}>{s.name}</option>
+            ))}
+          </select>
+        </div>
+
+        <footer className="flex flex-wrap items-center gap-2 pt-1 border-t border-white/5">
           <button
             onClick={onCopy}
-            className="flex-1 px-3 py-2 rounded-xl bg-white/10 hover:bg-white/20 border border-white/20 text-xs font-semibold text-neutral-100 transition-all flex items-center justify-center gap-2"
+            className="flex-1 px-3 py-2 rounded-xl bg-white/10 hover:bg-white/20 border border-white/20 text-xs font-semibold text-neutral-100 transition-all flex items-center justify-center gap-2 min-w-[5.5rem]"
           >
             <Copy className="w-3.5 h-3.5" />
             Copy
           </button>
           {result.outputKind === 'font-preview' && (
-            <button
-              onClick={onExportPng}
-              aria-label={`Download ${result.styleName} as transparent PNG`}
-              className="px-3 py-2 rounded-xl bg-violet-500/20 hover:bg-violet-500/30 border border-violet-500/40 text-xs font-semibold text-violet-200 transition-all flex items-center gap-2"
-            >
-              <ImageDown className="w-3.5 h-3.5" />
-              PNG
-            </button>
+            <>
+              <button
+                onClick={onCopyImage}
+                aria-label={`Copy ${result.styleName} as image`}
+                title="Copy the rendered text as a PNG image (paste anywhere)"
+                className="px-2.5 py-2 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-[11px] text-neutral-400 hover:text-neutral-200 transition-all flex items-center gap-1.5"
+              >
+                <ImagePlus className="w-3 h-3" />
+                Image
+              </button>
+              <button
+                onClick={onExportPng}
+                aria-label={`Download ${result.styleName} as transparent PNG`}
+                title="Download the rendered text as a transparent PNG file"
+                className="px-2.5 py-2 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-[11px] text-neutral-400 hover:text-neutral-200 transition-all flex items-center gap-1.5"
+              >
+                <ImageDown className="w-3 h-3" />
+                PNG
+              </button>
+            </>
           )}
         </footer>
       </article>

@@ -6,6 +6,8 @@
  * future UI layer (web, mobile, CLI, ...).
  */
 
+import type { UnicodeStyleId } from './unicodeStyleEngine';
+
 /** Style categories offered by the Font Studio. */
 export type FontStyleCategoryId =
   | 'scifi'
@@ -52,9 +54,11 @@ export interface UnicodeMapping {
 
 /** Whether the output is real copyable text, or a visual font preview only. */
 export type OutputKind =
-  /** Real Unicode text — copying preserves the appearance everywhere. */
+  /** Real Unicode text — copying preserves the appearance everywhere
+   *  (Discord nicknames included), even without the font installed. */
   | 'unicode'
-  /** Plain text rendered in a styled font — copying does NOT keep the font. */
+  /** Real Unicode text as well, plus a visual font that only survives
+   *  as a rendered image (Image/PNG export). */
   | 'font-preview';
 
 export interface FontStyleDefinition {
@@ -68,6 +72,10 @@ export interface FontStyleDefinition {
   outputKind: OutputKind;
   /** CSS font stack for font-preview styles (undefined for unicode styles). */
   fontFamily?: string;
+  /** Default nickname style id (see UNICODE_STYLES) used for the card
+   *  preview and the Copy button; undefined for styles without a plain
+   *  Letterlike/Alphanumeric equivalent (glitch, frames, spacing…). */
+  defaultStyleId?: UnicodeStyleId;
   /** Base transformation. Must preserve unsupported characters unchanged. */
   transform: (text: string) => string;
   /** Whether the letter-spacing control applies to this style. */
@@ -81,6 +89,11 @@ export interface FontStyleResult {
   output: string;
   outputKind: OutputKind;
   fontFamily?: string;
+  /** Raw text the result was generated from (Image/PNG render this in the
+   *  card's visual font, so the font look survives the export). */
+  sourceText: string;
+  /** Card's default nickname style id, when it has one. */
+  defaultStyleId?: UnicodeStyleId;
 }
 
 export interface StyleFilter {

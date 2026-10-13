@@ -71,8 +71,11 @@ describe('FontStudioView', () => {
     const card = screen.getByText('Quantum Bold').closest('article')!;
     await user.click(within(card).getByRole('button', { name: 'Copy' }));
 
+    // the clipboard receives the real Unicode characters
     expect(await readClipboard()).toBe('𝐇𝐢');
-    expect(screen.getByRole('status').textContent).toContain('Quantum Bold');
+    expect(screen.getByRole('status').textContent).toContain(
+      'Copied styled text. Paste it into your Discord nickname.'
+    );
   });
 
   it('copies all visible Unicode styles in a predictable format', async () => {
@@ -84,17 +87,17 @@ describe('FontStudioView', () => {
     const payload = await readClipboard();
     expect(payload.split('\n').every((line) => /^.+: .+$/.test(line))).toBe(true);
     expect(payload).toContain('Quantum Bold: 𝐇𝐢');
-    expect(screen.getByRole('status').textContent).toMatch(/Copied \d+ Unicode styles/);
+    expect(screen.getByRole('status').textContent).toMatch(/Copied \d+ styled texts/);
   });
 
-  it('keeps font previews out of Copy All (they are not copyable Unicode)', async () => {
+  it('includes font cards in Copy All — every card copies styled Unicode', async () => {
     const user = userEvent.setup();
     render(<FontStudioView />);
     await typeText(user, 'Hi');
     await user.click(screen.getByRole('button', { name: /Copy All/ }));
     const payload = await readClipboard();
-    expect(payload).not.toContain('Orbit Display:');
-    expect(payload).not.toContain('Fraktur Display:');
+    expect(payload).toContain('Orbit Display: 𝗛𝗶'); // sans-bold Unicode, not plain text
+    expect(payload).toContain('Fraktur Display:');
   });
 
   it('warns instead of silently failing when the clipboard is blocked', async () => {
@@ -217,7 +220,7 @@ describe('FontStudioView', () => {
     expect(screen.getByText('𝐚 𝐛 𝐜')).toBeTruthy();
   });
 
-  it('offers PNG export for font previews only, and keeps the copy honest', async () => {
+  it('offers image copy and PNG export for font previews only', async () => {
     const user = userEvent.setup();
     render(<FontStudioView />);
     await typeText(user, 'Hi');
@@ -225,12 +228,15 @@ describe('FontStudioView', () => {
     const fontCard = screen.getByText('Orbit Display').closest('article')!;
     const unicodeCard = screen.getByText('Quantum Bold').closest('article')!;
 
+    expect(within(fontCard).getByRole('button', { name: 'Copy Orbit Display as image' })).toBeTruthy();
     expect(within(fontCard).getByRole('button', { name: /transparent PNG/ })).toBeTruthy();
+    expect(within(unicodeCard).queryByRole('button', { name: /as image/ })).toBeNull();
     expect(within(unicodeCard).queryByRole('button', { name: /transparent PNG/ })).toBeNull();
 
+    // font cards copy real Unicode too (sans-bold here), never plain text
     await user.click(within(fontCard).getByRole('button', { name: 'Copy' }));
-    expect(await readClipboard()).toBe('Hi'); // plain text — font not included
-    expect(screen.getByRole('status').textContent).toContain('font not included');
+    expect(await readClipboard()).toBe('𝗛𝗶');
+    expect(screen.getByRole('status').textContent).toContain('Discord nickname');
   });
 
   it('exports a transparent PNG for font previews', async () => {
@@ -242,6 +248,19 @@ describe('FontStudioView', () => {
     expect(renderTextToPng).toHaveBeenCalledTimes(1);
     expect(downloadPng).toHaveBeenCalledTimes(1);
     expect(screen.getByRole('status').textContent).toContain('PNG exported');
+  });
+
+  it('copies a font preview as an image, downloading when images cannot be clipboard-copied', async () => {
+    const user = userEvent.setup();
+    render(<FontStudioView />);
+    await typeText(user, 'Hi');
+
+    await user.click(screen.getByRole('button', { name: 'Copy Orbit Display as image' }));
+    expect(renderTextToPng).toHaveBeenCalledTimes(1);
+    // jsdom has no ClipboardItem — the fallback downloads the PNG
+    // so the styled text is never lost.
+    expect(downloadPng).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('status').textContent).toContain('downloaded');
   });
 
   it('preserves mixed scripts and emoji in every rendered result', async () => {
@@ -278,5 +297,86 @@ describe('FontStudioView', () => {
 
     await user.click(screen.getByRole('button', { name: 'Clear history' }));
     expect(window.localStorage.getItem('font-studio:recents')).toBeNull();
+  });
+
+  it('pages results with a Show more control', async () => {
+    const user = userEvent.setup();
+    render(<FontStudioView />);
+    await typeText(user, 'Hi');
+
+    // 64 styles total — only the first page is rendered initially.
+    const grid = screen.getByLabelText('Generated styles');
+    expect(grid.querySelectorAll('article').length).toBe(24);
+
+    await user.click(screen.getByRole('button', { name: /Show more styles/ }));
+    expect(grid.querySelectorAll('article').length).toBe(48);
+    expect(screen.getByRole('button', { name: /Show more styles/ })).toBeTruthy();
+
+    await user.click(screen.getByRole('button', { name: /Show more styles/ }));
+    expect(grid.querySelectorAll('article').length).toBe(64);
+    expect(screen.queryByRole('button', { name: /Show more styles/ })).toBeNull();
+  });
+
+  it('offers the bundled sci-fi and gothic font previews', async () => {
+    const user = userEvent.setup();
+    render(<FontStudioView />);
+    await typeText(user, 'Hi');
+
+    await user.click(screen.getByRole('tab', { name: 'Sci-Fi & Futuristic' }));
+    const card = screen.getByText('Megatrox').closest('article')!;
+    expect(within(card).getByText('Unicode + font image')).toBeTruthy();
+    expect(within(card).getByRole('button', { name: 'Download Megatrox as transparent PNG' })).toBeTruthy();
+    // the preview shows the styled Unicode text in a plain system font
+    const preview = within(card).getByText('𝗛𝗶'); // Megatrox → sans bold
+    expect(preview.getAttribute('style')).toBeNull();
+
+    await user.click(screen.getByRole('tab', { name: 'Gothic & Blackletter' }));
+    expect(screen.getByText('Xylver Blackletter')).toBeTruthy();
+    expect(screen.getByText('The King')).toBeTruthy();
+  });
+
+  it('shows a nickname length counter and warns above the Discord limit', async () => {
+    const user = userEvent.setup();
+    render(<FontStudioView />);
+    await typeText(user, 'Hi');
+
+    // styled text is measured, not the input: 'Hi' → 2 styled characters
+    const card = screen.getByText('Quantum Bold').closest('article')!;
+    expect(within(card).getByText('2 / 32 nickname chars')).toBeTruthy();
+    expect(within(card).queryByText(/nickname limit/)).toBeNull();
+
+    await typeText(user, 'A'.repeat(33));
+    const overCard = screen.getByText('Quantum Bold').closest('article')!;
+    expect(within(overCard).getByText('33 / 32 nickname chars')).toBeTruthy();
+    expect(within(overCard).getByText(/Over Discord's 32-character nickname limit/)).toBeTruthy();
+  });
+
+  it('overrides the Unicode style per card from the dropdown', async () => {
+    const user = userEvent.setup();
+    render(<FontStudioView />);
+    await typeText(user, 'Hi');
+
+    const card = screen.getByText('Quantum Bold').closest('article')!;
+    const dropdown = within(card).getByLabelText('Unicode style') as HTMLSelectElement;
+    expect(dropdown.value).toBe('bold-serif');
+
+    await user.selectOptions(dropdown, 'monospace');
+    // preview and copy both use the overridden style
+    expect(within(card).getByText('𝙷𝚒')).toBeTruthy();
+    await user.click(within(card).getByRole('button', { name: 'Copy' }));
+    expect(await readClipboard()).toBe('𝙷𝚒');
+  });
+
+  it('cards without a plain alphabet equivalent keep their own transform', async () => {
+    const user = userEvent.setup();
+    render(<FontStudioView />);
+    await typeText(user, 'Hi');
+
+    // search narrows the grid to one card that is not on the first page
+    await user.type(screen.getByLabelText('Search styles'), 'Quiet Frame');
+    const card = screen.getByText('Quiet Frame').closest('article')!;
+    const dropdown = within(card).getByLabelText('Unicode style') as HTMLSelectElement;
+    expect(dropdown.value).toBe('');
+    expect(within(card).getByText(/— Hi —/)).toBeTruthy();
   });
 });

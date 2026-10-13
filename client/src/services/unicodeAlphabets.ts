@@ -92,6 +92,18 @@ function buildSuperscriptDigits(): Map<string, string> {
   return map;
 }
 
+/**
+ * Enclosed digits 1-9 (①, ❶, ⑴ …). Unicode has no enclosed zero in these
+ * ranges, so '0' intentionally stays unmapped and passes through unchanged.
+ */
+function enclosedDigits(start: number): Record<string, string> {
+  return Object.fromEntries(
+    DIGITS.split('')
+      .slice(1)
+      .map((ch, i) => [ch, String.fromCodePoint(start + i)])
+  );
+}
+
 /* ── Complete mathematical alphabets ─────────────────────────────────────── */
 
 export const MATH_BOLD = buildAlphabet({ upperStart: 0x1d400, lowerStart: 0x1d41a, digitStart: 0x1d7ce });
@@ -130,11 +142,38 @@ export const MATH_SANS_BOLD = buildAlphabet({ upperStart: 0x1d5d4, lowerStart: 0
 
 export const MATH_SANS_ITALIC = buildAlphabet({ upperStart: 0x1d608, lowerStart: 0x1d622 });
 
+/** No italic/sans-italic/bold-italic digits exist in the standard — omitted. */
+export const MATH_SANS_BOLD_ITALIC = buildAlphabet({ upperStart: 0x1d63c, lowerStart: 0x1d656 });
+
 export const MATH_MONOSPACE = buildAlphabet({ upperStart: 0x1d670, lowerStart: 0x1d68a, digitStart: 0x1d7f6 });
 
 export const FULLWIDTH = buildAlphabet({ upperStart: 0xff21, lowerStart: 0xff41, digitStart: 0xff10 });
 
-export const CIRCLED = buildAlphabet({ upperStart: 0x24b6, lowerStart: 0x24d0 });
+export const CIRCLED = buildAlphabet({
+  upperStart: 0x24b6,
+  lowerStart: 0x24d0,
+  // ⓪ (U+24EA) sits outside the ①-⑳ run; 1-9 follow it.
+  extras: { '0': '\u24ea', ...enclosedDigits(0x2460) },
+});
+
+/** Negative circled capitals 🅐-🅩 (U+1F150) — no lowercase forms exist. */
+export const NEGATIVE_CIRCLED = buildAlphabet({
+  upperStart: 0x1f150,
+  extras: enclosedDigits(0x2776),
+});
+
+/** Squared capitals 🄰-🅉 (U+1F130) — no lowercase or digit forms exist. */
+export const SQUARED = buildAlphabet({ upperStart: 0x1f130 });
+
+/** Negative squared capitals 🅰-🆉 (U+1F170) — no lowercase or digit forms exist. */
+export const NEGATIVE_SQUARED = buildAlphabet({ upperStart: 0x1f170 });
+
+/** Parenthesized capitals 🄐-🄩 (U+1F110) + lowercase ⒜-⒵ (U+249C) + digits ⑴-⑼. */
+export const PARENTHESIZED = buildAlphabet({
+  upperStart: 0x1f110,
+  lowerStart: 0x249c,
+  extras: enclosedDigits(0x2474),
+});
 
 /* ── Partial alphabets (real gaps preserved unchanged by the engine) ──────── */
 

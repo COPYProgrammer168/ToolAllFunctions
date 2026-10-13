@@ -264,6 +264,8 @@ export class TextTransformationRepository {
       output: this.engine.transform(text, style, options),
       outputKind: style.outputKind,
       fontFamily: style.fontFamily,
+      sourceText: text,
+      defaultStyleId: style.defaultStyleId,
     }));
   }
 

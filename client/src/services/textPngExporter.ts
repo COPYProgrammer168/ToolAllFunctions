@@ -39,6 +39,15 @@ export async function renderTextToPng(text: string, options: PngRenderOptions): 
   const color = options.color ?? '#ffffff';
   const maxWidth = options.maxWidth ?? 1600;
 
+  // Bundled/webfont families must be decoded before canvas can measure or
+  // draw with them — otherwise the PNG silently falls back to a system font.
+  try {
+    await document.fonts.load(`${fontSize}px ${options.fontFamily}`, trimmed);
+    await document.fonts.ready;
+  } catch {
+    /* font loading unsupported — proceed with whatever is available */
+  }
+
   const measureCanvas = document.createElement('canvas');
   const measureCtx = measureCanvas.getContext('2d');
   if (!measureCtx) throw new Error('Canvas 2D is not available in this browser.');

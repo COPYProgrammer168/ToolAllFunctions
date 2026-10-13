@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { FONT_STYLES, FONT_STYLE_CATEGORIES } from '../fontStyleCatalog';
+import { FONT_STYLES, FONT_STYLE_CATEGORIES, NICKNAME_STYLES } from '../fontStyleCatalog';
 import { FontStyleEngine, TextTransformationRepository } from '../fontStyleEngine';
 import { toCodePoints } from '../fontStyleEngine';
+import { UNICODE_STYLES } from '../unicodeStyleEngine';
 
 const engine = new FontStyleEngine(FONT_STYLES);
 const repository = new TextTransformationRepository(engine);
@@ -30,26 +31,51 @@ describe('style catalog integrity', () => {
     }
   });
 
-  it('marks font-preview styles with a font family and unicode styles without', () => {
+  it('has a Sci-Fi and a Gothic category with styles in each', () => {
+    expect(FONT_STYLES.some((s) => s.category === 'scifi')).toBe(true);
+    expect(FONT_STYLES.some((s) => s.category === 'gothic')).toBe(true);
+  });
+
+  it('every style transforms plain ASCII into real Unicode text', () => {
+    // Copy must always give styled Unicode — even cards that also have a
+    // visual font for the Image/PNG export.
+    for (const style of FONT_STYLES) {
+      if (!style.defaultStyleId) continue;
+      expect(style.transform('Hello'), style.id).not.toBe('Hello');
+    }
+  });
+
+  it('font-preview cards keep their visual font for image export', () => {
     for (const style of FONT_STYLES) {
       if (style.outputKind === 'font-preview') {
+        // The family is only used to render the Image/PNG export.
         expect(style.fontFamily, style.id).toBeTruthy();
-        expect(style.transform('unchanged'), style.id).toBe('unchanged');
+        expect(style.defaultStyleId, style.id).toBeTruthy();
       } else {
         expect(style.fontFamily, style.id).toBeUndefined();
       }
     }
   });
 
-  it('has a Sci-Fi and a Gothic category with styles in each', () => {
-    expect(FONT_STYLES.some((s) => s.category === 'scifi')).toBe(true);
-    expect(FONT_STYLES.some((s) => s.category === 'gothic')).toBe(true);
+  it('exposes the engine nickname styles as the card dropdown source', () => {
+    expect([...NICKNAME_STYLES].map((s) => s.id)).toEqual([...UNICODE_STYLES].map((s) => s.id));
+    expect(NICKNAME_STYLES.length).toBe(20);
   });
 
-  it('every unicode transform actually changes plain ASCII text', () => {
+  it('every defaultStyleId references a known Unicode nickname style', () => {
+    const known = new Set(UNICODE_STYLES.map((s) => s.id));
     for (const style of FONT_STYLES) {
-      if (style.outputKind !== 'unicode') continue;
-      expect(style.transform('Hello'), style.id).not.toBe('Hello');
+      if (style.defaultStyleId !== undefined) {
+        expect(known.has(style.defaultStyleId), `${style.id} → ${style.defaultStyleId}`).toBe(true);
+      }
+    }
+  });
+
+  it('every bundled font card names its closest Unicode style', () => {
+    for (const style of FONT_STYLES) {
+      if (style.fontFamily) {
+        expect(style.defaultStyleId, style.id).toBeTruthy();
+      }
     }
   });
 });
@@ -147,11 +173,14 @@ describe('catalog copy semantics', () => {
     }
   });
 
-  it('full copy-all includes font previews with their plain output', () => {
+  it('full copy-all includes font previews with their styled output', () => {
     const results = repository.generate('Hello');
     const payload = repository.formatCopyAll(results);
     for (const style of FONT_STYLES) {
       expect(payload).toContain(`${style.name}:`);
+      // font cards now copy real Unicode text too
+      const result = results.find((r) => r.styleId === style.id)!;
+      if (style.defaultStyleId) expect(result.output, style.id).not.toBe('Hello');
     }
   });
 });
