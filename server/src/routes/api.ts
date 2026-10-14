@@ -24,6 +24,7 @@ import { rateLimit } from '../utils/rateLimiter.js';
 import { downloadToFile } from '../utils/httpDownload.js';
 import { buildStreamHeaders, getStreamCredentials } from '../services/StreamCredentials.js';
 import { ffprobeBin, ffmpegBin } from '../utils/binaries.js';
+import { pdfToWordRouter } from '../modules/pdf-to-word/routes.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -58,6 +59,8 @@ const upload = multer({
 });
 
 export const apiRouter = Router();
+apiRouter.use('/tools/pdf-to-word', pdfToWordRouter);
+apiRouter.use('/pdf-to-word', pdfToWordRouter);
 
 /**
  * Translate an error into an API response. Errors that carry an HTTP status
@@ -667,7 +670,11 @@ apiRouter.post('/media/download', async (req, res) => {
             inputPath: downloadedSource,
             outputPath: job.outputPath,
             format: audioFormat,
-            targetBitrateKbps: customBitrate || 320,
+            // Pass the requested bitrate through untouched: an explicit
+            // request (e.g. Music mode's 320 kbps) must survive the encoder
+            // instead of being dropped by a direct stream copy at the source
+            // bitrate. With no request the extractor still defaults to 320.
+            targetBitrateKbps: customBitrate ? Number(customBitrate) : undefined,
             preferStreamCopy: true,
           });
         } else {

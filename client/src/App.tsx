@@ -24,6 +24,7 @@ import { DownloadManagerView } from './components/DownloadManagerView';
 import { BlenderView } from './components/BlenderView';
 import { MediaSettingsModal } from './components/MediaSettingsModal';
 import { FontStudioView } from './components/FontStudioView';
+import { PdfToWordView } from './components/PdfToWordView';
 
 import {
   analyzeVideoFile,
@@ -299,6 +300,9 @@ function App() {
         <main className="flex-1 flex flex-col p-4 sm:p-6 lg:p-8 max-w-7xl w-full mx-auto">
           {/* VIEW: FONT STUDIO / TEXT FORGE */}
           {activeSection === 'font-studio' && <FontStudioView />}
+
+          {/* VIEW: PDF TO WORD CONVERTER */}
+          {activeSection === 'pdf-to-word' && <PdfToWordView />}
 
           {/* VIEW: STUDIO VIDEO OPTIMIZER */}
           {activeSection === 'studio-optimize' && (

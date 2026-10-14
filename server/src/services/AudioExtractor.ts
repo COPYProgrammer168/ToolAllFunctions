@@ -110,10 +110,15 @@ export class AudioExtractor {
     let isStreamCopy = false;
     let qualityNotice: string | undefined;
     let outputBitrate = options.targetBitrateKbps || 320;
+    const requestedBitrate = options.targetBitrateKbps;
 
     // Check if Direct Stream Copy is feasible (e.g. AAC source to M4A/AAC output, or MP3 source to MP3 output)
+    // A copy is only safe when it cannot conflict with the caller's intent:
+    // copying a 128 kbps source would silently deliver 128 kbps even though
+    // 320 kbps was explicitly requested (e.g. "Download All → Music" mode).
     const canStreamCopy =
       preferStreamCopy !== false &&
+      (!requestedBitrate || probe.bitrateKbps >= requestedBitrate) &&
       ((probe.codec === 'aac' && (format === 'm4a' || format === 'aac')) ||
         (probe.codec === 'mp3' && format === 'mp3') ||
         (probe.isLossless && (format === 'flac' || format === 'wav')));

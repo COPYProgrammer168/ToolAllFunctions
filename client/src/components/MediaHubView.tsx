@@ -12,6 +12,7 @@ import {
   Download,
   ArrowRight,
   ShieldCheck,
+  FileText,
 } from 'lucide-react';
 import type { AppNavSection } from '../types';
 
@@ -27,6 +28,15 @@ interface MediaHubViewProps {
 
 export const MediaHubView: React.FC<MediaHubViewProps> = ({ onNavigate }) => {
   const tools = [
+    {
+      id: 'pdf-to-word' as AppNavSection,
+      title: 'PDF to Word',
+      badge: 'DOCX & OCR',
+      desc: 'Convert PDF files into editable Word documents with accurate layout, tables, images, and Khmer/English OCR.',
+      icon: FileText,
+      color: 'from-amber-500/20 to-orange-500/10 text-amber-400 border-amber-500/30',
+      titleColor: 'text-amber-300',
+    },
     {
       id: 'media-video-to-music' as AppNavSection,
       title: 'Video → Music',

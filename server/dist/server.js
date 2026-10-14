@@ -12,6 +12,7 @@ import './utils/cookies.js';
 import { apiRouter } from './routes/api.js';
 import { JobManager } from './services/JobManager.js';
 import { MediaJobManager } from './services/MediaJobManager.js';
+import { PdfJobManager } from './modules/pdf-to-word/jobManager.js';
 import { HardwareDetector } from './services/HardwareDetector.js';
 import { STORAGE_ROOT } from './utils/paths.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -40,6 +41,7 @@ app.use(/^\/(?!api|assets).*/, (req, res) => {
 async function startServer() {
     await JobManager.init();
     await MediaJobManager.init();
+    await PdfJobManager.init();
     const hw = await HardwareDetector.detect();
     console.log('----------------------------------------------------');
     console.log('AI Video Optimizer — Backend Engine Initialized');

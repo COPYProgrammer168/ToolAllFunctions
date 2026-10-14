@@ -14,6 +14,7 @@ import {
   Grid,
   Box,
   Type,
+  FileText,
 } from 'lucide-react';
 import type { AppNavSection } from '../types';
 
@@ -51,6 +52,12 @@ export const SidebarNavigation: React.FC<SidebarNavigationProps> = ({
           label: 'Font Studio',
           icon: Type,
           accent: 'text-cyan-400',
+        },
+        {
+          id: 'pdf-to-word' as AppNavSection,
+          label: 'PDF to Word',
+          icon: FileText,
+          accent: 'text-amber-400',
         },
       ],
     },

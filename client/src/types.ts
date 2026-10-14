@@ -280,6 +280,7 @@ export interface WatermarkRegion {
 export type AppNavSection =
   | 'studio-optimize'
   | 'font-studio'
+  | 'pdf-to-word'
   | 'media-hub'
   | 'media-video-to-music'
   | 'media-youtube'
