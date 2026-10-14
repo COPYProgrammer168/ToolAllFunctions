@@ -417,7 +417,7 @@ export const FontStudioView: React.FC = () => {
       {/* ── Controls ── */}
       <section className="glass-panel p-5 rounded-2xl border border-white/[0.08] space-y-4">
         {/* Categories */}
-        <div className="flex gap-1.5 overflow-x-auto no-scrollbar pb-1" role="tablist" aria-label="Style categories">
+        <div className="flex gap-1.5 overflow-x-auto no-scrollbar pb-1 -mx-1 px-1" role="tablist" aria-label="Style categories">
           {[{ id: 'all' as const, name: 'All Styles' }, ...FONT_STYLE_CATEGORIES].map((cat) => (
             <button
               key={cat.id}
@@ -550,7 +550,7 @@ export const FontStudioView: React.FC = () => {
 
       {/* ── Results / states ── */}
       {status === 'empty' && (
-        <div className="glass-panel p-10 rounded-2xl border border-white/[0.08] text-center space-y-2">
+        <div className="glass-panel p-6 sm:p-10 rounded-2xl border border-white/[0.08] text-center space-y-2">
           <Type className="w-8 h-8 text-neutral-600 mx-auto" />
           <h3 className="text-sm font-bold text-neutral-300">Enter text to forge styles</h3>
           <p className="text-xs text-neutral-500 max-w-md mx-auto">
@@ -560,7 +560,7 @@ export const FontStudioView: React.FC = () => {
       )}
 
       {status === 'error' && (
-        <div className="glass-panel p-10 rounded-2xl border border-rose-500/30 text-center space-y-3">
+        <div className="glass-panel p-6 sm:p-10 rounded-2xl border border-rose-500/30 text-center space-y-3">
           <h3 className="text-sm font-bold text-rose-300">Generation failed</h3>
           <p className="text-xs text-neutral-400">Something went wrong while transforming your text.</p>
           <button
@@ -573,7 +573,7 @@ export const FontStudioView: React.FC = () => {
       )}
 
       {status === 'ready' && results.length === 0 && (
-        <div className="glass-panel p-10 rounded-2xl border border-white/[0.08] text-center space-y-2">
+        <div className="glass-panel p-6 sm:p-10 rounded-2xl border border-white/[0.08] text-center space-y-2">
           <Search className="w-8 h-8 text-neutral-600 mx-auto" />
           <h3 className="text-sm font-bold text-neutral-300">No styles match your filters</h3>
           <p className="text-xs text-neutral-500">Try another category, clear the search, or reset to defaults.</p>
@@ -582,7 +582,7 @@ export const FontStudioView: React.FC = () => {
 
       {status === 'ready' && results.length > 0 && (
         <section className="space-y-4" aria-label="Generated styles">
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
             {results.slice(0, visibleCount).map((result) => (
               <FontStyleCard
                 key={result.styleId}
@@ -646,7 +646,7 @@ export const FontStudioView: React.FC = () => {
         <div
           role="status"
           aria-live="polite"
-          className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 px-4 py-2.5 rounded-xl bg-neutral-900/95 border border-cyan-500/40 shadow-lg shadow-cyan-500/10 text-xs font-semibold text-cyan-100 flex items-center gap-2 backdrop-blur-xl anim-fade-in-up"
+          className="fixed z-50 bottom-4 left-4 right-4 sm:bottom-6 sm:left-1/2 sm:right-auto sm:-translate-x-1/2 sm:max-w-md px-4 py-2.5 rounded-xl bg-neutral-900/95 border border-cyan-500/40 shadow-lg shadow-cyan-500/10 text-xs font-semibold text-cyan-100 text-center flex items-center justify-center gap-2 backdrop-blur-xl anim-fade-in-up"
         >
           <Check className="w-3.5 h-3.5 text-cyan-400" />
           {toast}
@@ -695,7 +695,7 @@ const FontStyleCard: React.FC<FontStyleCardProps> = React.memo(
     const overNicknameLimit = nicknameLength > NICKNAME_LIMIT;
 
     return (
-      <article className="glass-panel rounded-2xl border border-white/[0.08] p-4 flex flex-col gap-3 hover:border-white/20 transition-all">
+      <article className="glass-panel rounded-2xl border border-white/[0.08] p-3.5 sm:p-4 flex flex-col gap-3 hover:border-white/20 transition-all">
         <header className="flex items-start justify-between gap-2">
           <div className="min-w-0">
             <h3 className="text-sm font-bold text-neutral-100 truncate">{result.styleName}</h3>
@@ -719,7 +719,7 @@ const FontStyleCard: React.FC<FontStyleCardProps> = React.memo(
 
         {/* Preview is deliberately a plain system font: what you see here
             is character-for-character what Copy puts on the clipboard. */}
-        <p className="text-lg leading-relaxed text-neutral-100 break-words min-h-[2rem]">
+        <p className="text-base sm:text-lg leading-relaxed text-neutral-100 break-words min-h-[2rem]">
           {result.output || <span className="text-neutral-600 text-sm">(empty output)</span>}
         </p>
 
