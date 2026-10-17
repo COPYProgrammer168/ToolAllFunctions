@@ -1,4 +1,12 @@
-import type { OptimizationReport, JobConfig, JobProgress, HardwareInfo, SeoReport } from '../types';
+import type {
+  OptimizationReport,
+  JobConfig,
+  JobProgress,
+  HardwareInfo,
+  SeoReport,
+  SeoAnalyzeScope,
+  SitemapReport,
+} from '../types';
 
 export interface AnalysisResponse {
   report: OptimizationReport;
@@ -559,17 +567,36 @@ export async function generateCaptions(params: {
 
 /**
  * Analyze a public website URL and derive SEO/GEO keywords, H1 suggestions,
- * meta descriptions, tags and social captions.
+ * meta descriptions, tags and social captions. `scope: 'site'` also crawls
+ * internal pages and audits the whole site.
  */
-export async function analyzeSeoUrl(url: string): Promise<SeoReport> {
+export async function analyzeSeoUrl(url: string, scope: SeoAnalyzeScope = 'site'): Promise<SeoReport> {
   const res = await fetch('/api/seo/analyze', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url, scope }),
+  });
+
+  if (!res.ok) {
+    throw mediaRequestError(res, await readErrorBody(res), `Website analysis failed (HTTP ${res.status})`);
+  }
+
+  return res.json();
+}
+
+/**
+ * Crawl a site and generate a sitemap.xml plus a robots.txt snippet.
+ * Heavy for the server — the UI shows its own loading state for this call.
+ */
+export async function generateSitemap(url: string): Promise<SitemapReport> {
+  const res = await fetch('/api/seo/sitemap', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ url }),
   });
 
   if (!res.ok) {
-    throw mediaRequestError(res, await readErrorBody(res), `Website analysis failed (HTTP ${res.status})`);
+    throw mediaRequestError(res, await readErrorBody(res), `Sitemap generation failed (HTTP ${res.status})`);
   }
 
   return res.json();

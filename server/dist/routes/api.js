@@ -19,6 +19,7 @@ import { WatermarkEditor } from '../services/WatermarkEditor.js';
 import { ImageProcessor } from '../services/ImageProcessor.js';
 import { CaptionGenerator, cuesToSrt, cuesToVtt, cuesToTxt } from '../services/CaptionGenerator.js';
 import { SeoAnalyzer } from '../services/SeoAnalyzer.js';
+import { SitemapGenerator } from '../services/SitemapGenerator.js';
 import { sanitizeFilename } from '../utils/security.js';
 import { DEFAULT_RATE_LIMIT_RETRY_AFTER_SEC } from '../utils/errors.js';
 import { rateLimit } from '../utils/rateLimiter.js';
@@ -1238,15 +1239,31 @@ apiRouter.post('/media/captions', async (req, res) => {
 const seoAnalyzeRateLimit = rateLimit({ windowMs: 60_000, max: 15, label: 'seo-analyze' });
 apiRouter.post('/seo/analyze', seoAnalyzeRateLimit, async (req, res) => {
     try {
-        const { url } = req.body || {};
+        const { url, scope } = req.body || {};
         if (!url || typeof url !== 'string') {
             return res.status(400).json({ error: 'Provide a website URL (url) to analyze.' });
         }
-        const report = await SeoAnalyzer.analyze(url);
+        const report = await SeoAnalyzer.analyze(url, { scope: scope === 'site' ? 'site' : 'page' });
         res.json(report);
     }
     catch (err) {
         console.error('SEO analyze error:', err?.message || err);
+        respondApiError(res, err, 400);
+    }
+});
+// Sitemap generation is a heavier crawl, so it gets its own tighter limiter.
+const seoSitemapRateLimit = rateLimit({ windowMs: 60_000, max: 6, label: 'seo-sitemap' });
+apiRouter.post('/seo/sitemap', seoSitemapRateLimit, async (req, res) => {
+    try {
+        const { url } = req.body || {};
+        if (!url || typeof url !== 'string') {
+            return res.status(400).json({ error: 'Provide a website URL (url) to generate a sitemap for.' });
+        }
+        const report = await SitemapGenerator.generate(url);
+        res.json(report);
+    }
+    catch (err) {
+        console.error('Sitemap generate error:', err?.message || err);
         respondApiError(res, err, 400);
     }
 });

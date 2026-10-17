@@ -1,5 +1,6 @@
 import { URL } from 'node:url';
 import { validateRemoteUrl } from '../utils/security.js';
+import { crawlSite } from './SitemapGenerator.js';
 /**
  * SEO & GEO (Generative Engine Optimization) website analyzer.
  *
@@ -16,12 +17,18 @@ import { validateRemoteUrl } from '../utils/security.js';
 const MAX_HTML_BYTES = 5 * 1024 * 1024;
 const FETCH_TIMEOUT_MS = 20_000;
 const MAX_REDIRECTS = 5;
+/** Whole-site analysis crawls fewer pages than the sitemap generator (each page gets a full audit). */
+const MAX_ANALYZE_PAGES = 25;
 const USER_AGENT = 'Mozilla/5.0 (compatible; VideoOptimizeSeoBot/1.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36';
 /**
  * Fetch a page while re-validating every redirect hop against the SSRF guard,
  * capping the body size and enforcing a hard timeout.
  */
-async function fetchPage(rawUrl) {
+export async function fetchPage(rawUrl, opts = {}) {
+    const expect = opts.expect ?? 'html';
+    const maxBytes = opts.maxBytes ?? MAX_HTML_BYTES;
+    const timeoutMs = opts.timeoutMs ?? FETCH_TIMEOUT_MS;
+    const timeoutSec = Math.round(timeoutMs / 1000);
     let current = rawUrl;
     for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
         const check = await validateRemoteUrl(current);
@@ -30,7 +37,7 @@ async function fetchPage(rawUrl) {
         }
         current = check.normalizedUrl;
         const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
         try {
             const res = await fetch(current, {
                 redirect: 'manual',
@@ -54,19 +61,19 @@ async function fetchPage(rawUrl) {
                 throw new Error(`The website responded with HTTP ${res.status}${res.statusText ? ` ${res.statusText}` : ''}.`);
             }
             const contentType = (res.headers.get('content-type') || '').toLowerCase();
-            if (!contentType.includes('text/html') && !contentType.includes('application/xhtml+xml')) {
+            if (expect === 'html' && !contentType.includes('text/html') && !contentType.includes('application/xhtml+xml')) {
                 throw new Error(`The URL did not return an HTML page (content-type: ${contentType || 'unknown'}). Open a regular website page instead.`);
             }
             const contentLength = Number(res.headers.get('content-length') || 0);
-            if (contentLength > MAX_HTML_BYTES) {
-                throw new Error('The page is too large to analyze (over 5 MB of HTML).');
+            if (contentLength > maxBytes) {
+                throw new Error(`The page is too large to analyze (over ${Math.round(maxBytes / (1024 * 1024))} MB).`);
             }
-            const html = await readBodyCapped(res, MAX_HTML_BYTES);
-            return { html, finalUrl: current };
+            const html = await readBodyCapped(res, maxBytes);
+            return { html, finalUrl: current, lastModified: res.headers.get('last-modified') || undefined };
         }
         catch (err) {
             if (err?.name === 'AbortError') {
-                throw new Error('The website took too long to respond (20 second limit).');
+                throw new Error(`The website took too long to respond (${timeoutSec} second limit).`);
             }
             throw err;
         }
@@ -90,7 +97,7 @@ async function readBodyCapped(res, maxBytes) {
         received += value.byteLength;
         if (received > maxBytes) {
             await reader.cancel().catch(() => { });
-            throw new Error('The page is too large to analyze (over 5 MB of HTML).');
+            throw new Error(`The page is too large to analyze (over ${Math.round(maxBytes / (1024 * 1024))} MB).`);
         }
         chunks.push(Buffer.from(value));
     }
@@ -501,7 +508,7 @@ function buildIssues(page) {
         issues.push('The <html> tag has no lang attribute.');
     return issues;
 }
-function extractTitle(html) {
+export function extractTitle(html) {
     const m = /<title\b[^>]*>([\s\S]*?)<\/title>/i.exec(html);
     return m ? normalizeWhitespace(decodeEntities(m[1])) : '';
 }
@@ -515,73 +522,172 @@ function hasLinkRel(html, rel) {
     }
     return false;
 }
+function extractPageSignals(html, pageUrl) {
+    const meta = extractMeta(html);
+    const bodyMatch = /<body\b[^>]*>([\s\S]*?)<\/body>/i.exec(html);
+    const bodyHtml = bodyMatch ? bodyMatch[1] : html;
+    const visibleText = htmlToText(bodyHtml, { dropNavChrome: true });
+    const wordCount = (visibleText.match(/[\p{L}\p{N}]+/gu) || []).length;
+    const { total: imageCount, missingAlt: imagesMissingAlt } = countImages(bodyHtml);
+    const { internal: internalLinks, external: externalLinks } = countLinks(bodyHtml, pageUrl);
+    let siteName = meta['og:site_name'] || '';
+    if (!siteName) {
+        try {
+            siteName = new URL(pageUrl).host.replace(/^www\./i, '');
+        }
+        catch {
+            siteName = '';
+        }
+    }
+    return {
+        title: normalizeWhitespace(extractTitle(html) || meta['og:title'] || ''),
+        metaDescription: normalizeWhitespace(meta['description'] || meta['og:description'] || ''),
+        metaKeywords: meta['keywords'] || '',
+        language: attr(/<html\b[^>]*>/i.exec(html)?.[0] || '', 'lang'),
+        h1: extractHeadings(html, 1),
+        h2: extractHeadings(html, 2),
+        h3: extractHeadings(html, 3),
+        visibleText,
+        wordCount,
+        imageCount,
+        imagesMissingAlt,
+        internalLinks,
+        externalLinks,
+        hasCanonical: hasLinkRel(html, 'canonical'),
+        hasOpenGraph: Object.keys(meta).some((k) => k.startsWith('og:')),
+        hasTwitterCard: Object.keys(meta).some((k) => k.startsWith('twitter:')),
+        hasStructuredData: /<script\b[^>]*type\s*=\s*["']application\/ld\+json["']/i.test(html),
+        openGraph: {
+            title: meta['og:title'],
+            description: meta['og:description'],
+            image: meta['og:image'],
+            type: meta['og:type'],
+        },
+        siteName,
+    };
+}
+/** Group non-empty values that appear on more than one page (case-insensitive). */
+function groupDuplicates(entries) {
+    const map = new Map();
+    for (const e of entries) {
+        const value = e.value.trim();
+        if (!value)
+            continue;
+        const key = value.toLowerCase();
+        const existing = map.get(key);
+        if (existing)
+            existing.urls.push(e.url);
+        else
+            map.set(key, { value, urls: [e.url] });
+    }
+    return [...map.values()]
+        .filter((g) => g.urls.length > 1)
+        .sort((a, b) => b.urls.length - a.urls.length || a.value.localeCompare(b.value))
+        .slice(0, 10);
+}
+/** Crawl the site and audit every reachable page (bounded by crawlSite). */
+async function analyzeSite(startUrl) {
+    const crawl = await crawlSite(startUrl, { maxPages: MAX_ANALYZE_PAGES });
+    const pages = [];
+    const textParts = [];
+    const headingParts = [];
+    let textBudget = 200_000;
+    for (const p of crawl.pages) {
+        const signals = extractPageSignals(p.html, p.loc);
+        const info = {
+            title: signals.title,
+            metaDescription: signals.metaDescription,
+            metaKeywords: signals.metaKeywords,
+            language: signals.language,
+            h1: signals.h1,
+            h2: signals.h2,
+            h3: signals.h3,
+            wordCount: signals.wordCount,
+            imageCount: signals.imageCount,
+            imagesMissingAlt: signals.imagesMissingAlt,
+            internalLinks: signals.internalLinks,
+            externalLinks: signals.externalLinks,
+            hasCanonical: signals.hasCanonical,
+            hasOpenGraph: signals.hasOpenGraph,
+            hasTwitterCard: signals.hasTwitterCard,
+            hasStructuredData: signals.hasStructuredData,
+            openGraph: signals.openGraph,
+        };
+        const issues = buildIssues(info);
+        pages.push({
+            url: p.loc,
+            title: signals.title,
+            metaDescription: signals.metaDescription,
+            h1Count: signals.h1.length,
+            wordCount: signals.wordCount,
+            issueCount: issues.length,
+            issues,
+        });
+        if (textBudget > 0) {
+            const text = signals.visibleText.slice(0, textBudget);
+            textParts.push(text);
+            textBudget -= text.length;
+        }
+        headingParts.push(...signals.h1, ...signals.h2);
+    }
+    const siteKeywords = buildKeywords(textParts.join(' '), pages[0]?.title || '', headingParts.join(' '));
+    const totals = {
+        issuePages: pages.filter((p) => p.issueCount > 0).length,
+        missingTitles: pages.filter((p) => !p.title).length,
+        missingDescriptions: pages.filter((p) => !p.metaDescription).length,
+        missingH1: pages.filter((p) => p.h1Count === 0).length,
+        multipleH1: pages.filter((p) => p.h1Count > 1).length,
+        thinPages: pages.filter((p) => p.wordCount > 0 && p.wordCount < 300).length,
+    };
+    return {
+        pageCount: pages.length,
+        pages,
+        duplicateTitles: groupDuplicates(pages.map((p) => ({ value: p.title, url: p.url }))),
+        duplicateDescriptions: groupDuplicates(pages.map((p) => ({ value: p.metaDescription, url: p.url }))),
+        siteKeywords,
+        totals,
+        notices: crawl.notices,
+    };
+}
 export class SeoAnalyzer {
     /** Fetch a public web page and derive the full SEO/GEO content report. */
-    static async analyze(rawUrl) {
+    static async analyze(rawUrl, opts = {}) {
         const input = (rawUrl || '').trim();
         if (!/^https?:\/\//i.test(input)) {
             throw new Error('Enter a full website URL starting with http:// or https://.');
         }
         const { html, finalUrl } = await fetchPage(input);
-        const meta = extractMeta(html);
+        const signals = extractPageSignals(html, finalUrl);
+        const { title, metaDescription, siteName } = signals;
         const notices = [];
-        const title = normalizeWhitespace(extractTitle(html) || meta['og:title'] || '');
-        const metaDescription = normalizeWhitespace(meta['description'] || meta['og:description'] || '');
-        const htmlTag = /<html\b[^>]*>/i.exec(html)?.[0] || '';
-        const language = attr(htmlTag, 'lang');
-        const h1 = extractHeadings(html, 1);
-        const h2 = extractHeadings(html, 2);
-        const h3 = extractHeadings(html, 3);
-        const bodyMatch = /<body\b[^>]*>([\s\S]*?)<\/body>/i.exec(html);
-        const bodyHtml = bodyMatch ? bodyMatch[1] : html;
-        const visibleText = htmlToText(bodyHtml, { dropNavChrome: true });
-        const wordCount = (visibleText.match(/[\p{L}\p{N}]+/gu) || []).length;
-        if (wordCount < 80) {
+        if (signals.wordCount < 80) {
             notices.push(html.length > 60_000
                 ? 'This page appears to render its content with JavaScript, so a static fetch may have missed text. ' +
                     'For single-page apps, analyze a server-rendered page or add pre-rendered HTML for crawlers.'
                 : 'This page has very little visible text, so keyword, description and caption suggestions are limited.');
         }
-        const { total: imageCount, missingAlt: imagesMissingAlt } = countImages(bodyHtml);
-        const { internal: internalLinks, external: externalLinks } = countLinks(bodyHtml, finalUrl);
-        const ogKeys = Object.keys(meta).filter((k) => k.startsWith('og:'));
-        const hasStructuredData = /<script\b[^>]*type\s*=\s*["']application\/ld\+json["']/i.test(html);
-        const sentences = splitSentences(visibleText);
-        const keywords = buildKeywords(visibleText, title, [...h1, ...h2, ...h3].join(' '));
+        const sentences = splitSentences(signals.visibleText);
+        const keywords = buildKeywords(signals.visibleText, title, [...signals.h1, ...signals.h2, ...signals.h3].join(' '));
         const geoQuestions = extractQuestions(sentences);
         const page = {
             title,
             metaDescription,
-            metaKeywords: meta['keywords'] || '',
-            language,
-            h1,
-            h2,
-            h3,
-            wordCount,
-            imageCount,
-            imagesMissingAlt,
-            internalLinks,
-            externalLinks,
-            hasCanonical: hasLinkRel(html, 'canonical'),
-            hasOpenGraph: ogKeys.length > 0,
-            hasTwitterCard: Object.keys(meta).some((k) => k.startsWith('twitter:')),
-            hasStructuredData,
-            openGraph: {
-                title: meta['og:title'],
-                description: meta['og:description'],
-                image: meta['og:image'],
-                type: meta['og:type'],
-            },
+            metaKeywords: signals.metaKeywords,
+            language: signals.language,
+            h1: signals.h1,
+            h2: signals.h2,
+            h3: signals.h3,
+            wordCount: signals.wordCount,
+            imageCount: signals.imageCount,
+            imagesMissingAlt: signals.imagesMissingAlt,
+            internalLinks: signals.internalLinks,
+            externalLinks: signals.externalLinks,
+            hasCanonical: signals.hasCanonical,
+            hasOpenGraph: signals.hasOpenGraph,
+            hasTwitterCard: signals.hasTwitterCard,
+            hasStructuredData: signals.hasStructuredData,
+            openGraph: signals.openGraph,
         };
-        let siteName = meta['og:site_name'] || '';
-        if (!siteName) {
-            try {
-                siteName = new URL(finalUrl).host.replace(/^www\./i, '');
-            }
-            catch {
-                siteName = '';
-            }
-        }
         const hashtags = buildHashtags(keywords);
         // Prefer the headline's own key phrase when it has one — it reads far
         // better in captions and titles than a bare high-frequency word
@@ -594,7 +700,7 @@ export class SeoAnalyzer {
             : topPhrase && topPhrase.score >= (keywords[0]?.score ?? 0) * 0.5
                 ? topPhrase.term
                 : keywords[0]?.term || '';
-        return {
+        const report = {
             url: input,
             finalUrl,
             siteName,
@@ -611,5 +717,9 @@ export class SeoAnalyzer {
             issues: buildIssues(page),
             notices,
         };
+        if (opts.scope === 'site') {
+            report.site = await analyzeSite(finalUrl);
+        }
+        return report;
     }
 }

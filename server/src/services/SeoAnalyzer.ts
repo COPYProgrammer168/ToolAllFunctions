@@ -1,5 +1,6 @@
 import { URL } from 'node:url';
 import { validateRemoteUrl } from '../utils/security.js';
+import { crawlSite } from './SitemapGenerator.js';
 
 /**
  * SEO & GEO (Generative Engine Optimization) website analyzer.
@@ -18,6 +19,9 @@ import { validateRemoteUrl } from '../utils/security.js';
 const MAX_HTML_BYTES = 5 * 1024 * 1024;
 const FETCH_TIMEOUT_MS = 20_000;
 const MAX_REDIRECTS = 5;
+
+/** Whole-site analysis crawls fewer pages than the sitemap generator (each page gets a full audit). */
+const MAX_ANALYZE_PAGES = 25;
 
 const USER_AGENT =
   'Mozilla/5.0 (compatible; VideoOptimizeSeoBot/1.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36';
@@ -78,18 +82,72 @@ export interface SeoReport {
   captions: SeoCaptionDraft[];
   issues: string[];
   notices: string[];
+  /** Present when the analysis ran in whole-site mode. */
+  site?: SeoSiteAudit;
 }
 
-interface FetchedPage {
+export interface SeoAnalyzeOptions {
+  /** 'page' (default) analyzes the entered URL; 'site' also crawls and audits internal pages. */
+  scope?: 'page' | 'site';
+}
+
+/** Light per-page audit row used by the whole-site analysis. */
+export interface SeoPageAudit {
+  url: string;
+  title: string;
+  metaDescription: string;
+  h1Count: number;
+  wordCount: number;
+  issueCount: number;
+  issues: string[];
+}
+
+export interface SeoDuplicateGroup {
+  value: string;
+  urls: string[];
+}
+
+export interface SeoSiteAudit {
+  pageCount: number;
+  pages: SeoPageAudit[];
+  duplicateTitles: SeoDuplicateGroup[];
+  duplicateDescriptions: SeoDuplicateGroup[];
+  /** Keywords aggregated across every crawled page. */
+  siteKeywords: SeoKeyword[];
+  totals: {
+    issuePages: number;
+    missingTitles: number;
+    missingDescriptions: number;
+    missingH1: number;
+    multipleH1: number;
+    thinPages: number;
+  };
+  notices: string[];
+}
+
+export interface FetchedPage {
   html: string;
   finalUrl: string;
+  /** Raw HTTP Last-Modified header when the server sent one. */
+  lastModified?: string;
+}
+
+export interface FetchPageOptions {
+  /** 'html' (default) rejects non-HTML responses; 'any' accepts text files like robots.txt. */
+  expect?: 'html' | 'any';
+  maxBytes?: number;
+  timeoutMs?: number;
 }
 
 /**
  * Fetch a page while re-validating every redirect hop against the SSRF guard,
  * capping the body size and enforcing a hard timeout.
  */
-async function fetchPage(rawUrl: string): Promise<FetchedPage> {
+export async function fetchPage(rawUrl: string, opts: FetchPageOptions = {}): Promise<FetchedPage> {
+  const expect = opts.expect ?? 'html';
+  const maxBytes = opts.maxBytes ?? MAX_HTML_BYTES;
+  const timeoutMs = opts.timeoutMs ?? FETCH_TIMEOUT_MS;
+  const timeoutSec = Math.round(timeoutMs / 1000);
   let current = rawUrl;
 
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
@@ -100,7 +158,7 @@ async function fetchPage(rawUrl: string): Promise<FetchedPage> {
     current = check.normalizedUrl;
 
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const res = await fetch(current, {
         redirect: 'manual',
@@ -127,22 +185,22 @@ async function fetchPage(rawUrl: string): Promise<FetchedPage> {
       }
 
       const contentType = (res.headers.get('content-type') || '').toLowerCase();
-      if (!contentType.includes('text/html') && !contentType.includes('application/xhtml+xml')) {
+      if (expect === 'html' && !contentType.includes('text/html') && !contentType.includes('application/xhtml+xml')) {
         throw new Error(
           `The URL did not return an HTML page (content-type: ${contentType || 'unknown'}). Open a regular website page instead.`
         );
       }
 
       const contentLength = Number(res.headers.get('content-length') || 0);
-      if (contentLength > MAX_HTML_BYTES) {
-        throw new Error('The page is too large to analyze (over 5 MB of HTML).');
+      if (contentLength > maxBytes) {
+        throw new Error(`The page is too large to analyze (over ${Math.round(maxBytes / (1024 * 1024))} MB).`);
       }
 
-      const html = await readBodyCapped(res, MAX_HTML_BYTES);
-      return { html, finalUrl: current };
+      const html = await readBodyCapped(res, maxBytes);
+      return { html, finalUrl: current, lastModified: res.headers.get('last-modified') || undefined };
     } catch (err: any) {
       if (err?.name === 'AbortError') {
-        throw new Error('The website took too long to respond (20 second limit).');
+        throw new Error(`The website took too long to respond (${timeoutSec} second limit).`);
       }
       throw err;
     } finally {
@@ -166,7 +224,7 @@ async function readBodyCapped(res: Response, maxBytes: number): Promise<string> 
     received += value.byteLength;
     if (received > maxBytes) {
       await reader.cancel().catch(() => {});
-      throw new Error('The page is too large to analyze (over 5 MB of HTML).');
+      throw new Error(`The page is too large to analyze (over ${Math.round(maxBytes / (1024 * 1024))} MB).`);
     }
     chunks.push(Buffer.from(value));
   }
@@ -614,7 +672,7 @@ function buildIssues(page: SeoPageInfo): string[] {
   return issues;
 }
 
-function extractTitle(html: string): string {
+export function extractTitle(html: string): string {
   const m = /<title\b[^>]*>([\s\S]*?)<\/title>/i.exec(html);
   return m ? normalizeWhitespace(decodeEntities(m[1])) : '';
 }
@@ -629,32 +687,177 @@ function hasLinkRel(html: string, rel: string): boolean {
   return false;
 }
 
+/** Raw on-page signals shared by the single-page report and the site audit. */
+interface PageSignals {
+  title: string;
+  metaDescription: string;
+  metaKeywords: string;
+  language: string;
+  h1: string[];
+  h2: string[];
+  h3: string[];
+  visibleText: string;
+  wordCount: number;
+  imageCount: number;
+  imagesMissingAlt: number;
+  internalLinks: number;
+  externalLinks: number;
+  hasCanonical: boolean;
+  hasOpenGraph: boolean;
+  hasTwitterCard: boolean;
+  hasStructuredData: boolean;
+  openGraph: { title?: string; description?: string; image?: string; type?: string };
+  siteName: string;
+}
+
+function extractPageSignals(html: string, pageUrl: string): PageSignals {
+  const meta = extractMeta(html);
+  const bodyMatch = /<body\b[^>]*>([\s\S]*?)<\/body>/i.exec(html);
+  const bodyHtml = bodyMatch ? bodyMatch[1] : html;
+  const visibleText = htmlToText(bodyHtml, { dropNavChrome: true });
+  const wordCount = (visibleText.match(/[\p{L}\p{N}]+/gu) || []).length;
+  const { total: imageCount, missingAlt: imagesMissingAlt } = countImages(bodyHtml);
+  const { internal: internalLinks, external: externalLinks } = countLinks(bodyHtml, pageUrl);
+
+  let siteName = meta['og:site_name'] || '';
+  if (!siteName) {
+    try {
+      siteName = new URL(pageUrl).host.replace(/^www\./i, '');
+    } catch {
+      siteName = '';
+    }
+  }
+
+  return {
+    title: normalizeWhitespace(extractTitle(html) || meta['og:title'] || ''),
+    metaDescription: normalizeWhitespace(meta['description'] || meta['og:description'] || ''),
+    metaKeywords: meta['keywords'] || '',
+    language: attr(/<html\b[^>]*>/i.exec(html)?.[0] || '', 'lang'),
+    h1: extractHeadings(html, 1),
+    h2: extractHeadings(html, 2),
+    h3: extractHeadings(html, 3),
+    visibleText,
+    wordCount,
+    imageCount,
+    imagesMissingAlt,
+    internalLinks,
+    externalLinks,
+    hasCanonical: hasLinkRel(html, 'canonical'),
+    hasOpenGraph: Object.keys(meta).some((k) => k.startsWith('og:')),
+    hasTwitterCard: Object.keys(meta).some((k) => k.startsWith('twitter:')),
+    hasStructuredData: /<script\b[^>]*type\s*=\s*["']application\/ld\+json["']/i.test(html),
+    openGraph: {
+      title: meta['og:title'],
+      description: meta['og:description'],
+      image: meta['og:image'],
+      type: meta['og:type'],
+    },
+    siteName,
+  };
+}
+
+/** Group non-empty values that appear on more than one page (case-insensitive). */
+function groupDuplicates(entries: Array<{ value: string; url: string }>): SeoDuplicateGroup[] {
+  const map = new Map<string, SeoDuplicateGroup>();
+  for (const e of entries) {
+    const value = e.value.trim();
+    if (!value) continue;
+    const key = value.toLowerCase();
+    const existing = map.get(key);
+    if (existing) existing.urls.push(e.url);
+    else map.set(key, { value, urls: [e.url] });
+  }
+  return [...map.values()]
+    .filter((g) => g.urls.length > 1)
+    .sort((a, b) => b.urls.length - a.urls.length || a.value.localeCompare(b.value))
+    .slice(0, 10);
+}
+
+/** Crawl the site and audit every reachable page (bounded by crawlSite). */
+async function analyzeSite(startUrl: string): Promise<SeoSiteAudit> {
+  const crawl = await crawlSite(startUrl, { maxPages: MAX_ANALYZE_PAGES });
+  const pages: SeoPageAudit[] = [];
+  const textParts: string[] = [];
+  const headingParts: string[] = [];
+  let textBudget = 200_000;
+
+  for (const p of crawl.pages) {
+    const signals = extractPageSignals(p.html, p.loc);
+    const info: SeoPageInfo = {
+      title: signals.title,
+      metaDescription: signals.metaDescription,
+      metaKeywords: signals.metaKeywords,
+      language: signals.language,
+      h1: signals.h1,
+      h2: signals.h2,
+      h3: signals.h3,
+      wordCount: signals.wordCount,
+      imageCount: signals.imageCount,
+      imagesMissingAlt: signals.imagesMissingAlt,
+      internalLinks: signals.internalLinks,
+      externalLinks: signals.externalLinks,
+      hasCanonical: signals.hasCanonical,
+      hasOpenGraph: signals.hasOpenGraph,
+      hasTwitterCard: signals.hasTwitterCard,
+      hasStructuredData: signals.hasStructuredData,
+      openGraph: signals.openGraph,
+    };
+    const issues = buildIssues(info);
+
+    pages.push({
+      url: p.loc,
+      title: signals.title,
+      metaDescription: signals.metaDescription,
+      h1Count: signals.h1.length,
+      wordCount: signals.wordCount,
+      issueCount: issues.length,
+      issues,
+    });
+
+    if (textBudget > 0) {
+      const text = signals.visibleText.slice(0, textBudget);
+      textParts.push(text);
+      textBudget -= text.length;
+    }
+    headingParts.push(...signals.h1, ...signals.h2);
+  }
+
+  const siteKeywords = buildKeywords(textParts.join(' '), pages[0]?.title || '', headingParts.join(' '));
+
+  const totals = {
+    issuePages: pages.filter((p) => p.issueCount > 0).length,
+    missingTitles: pages.filter((p) => !p.title).length,
+    missingDescriptions: pages.filter((p) => !p.metaDescription).length,
+    missingH1: pages.filter((p) => p.h1Count === 0).length,
+    multipleH1: pages.filter((p) => p.h1Count > 1).length,
+    thinPages: pages.filter((p) => p.wordCount > 0 && p.wordCount < 300).length,
+  };
+
+  return {
+    pageCount: pages.length,
+    pages,
+    duplicateTitles: groupDuplicates(pages.map((p) => ({ value: p.title, url: p.url }))),
+    duplicateDescriptions: groupDuplicates(pages.map((p) => ({ value: p.metaDescription, url: p.url }))),
+    siteKeywords,
+    totals,
+    notices: crawl.notices,
+  };
+}
+
 export class SeoAnalyzer {
   /** Fetch a public web page and derive the full SEO/GEO content report. */
-  static async analyze(rawUrl: string): Promise<SeoReport> {
+  static async analyze(rawUrl: string, opts: SeoAnalyzeOptions = {}): Promise<SeoReport> {
     const input = (rawUrl || '').trim();
     if (!/^https?:\/\//i.test(input)) {
       throw new Error('Enter a full website URL starting with http:// or https://.');
     }
 
     const { html, finalUrl } = await fetchPage(input);
-    const meta = extractMeta(html);
+    const signals = extractPageSignals(html, finalUrl);
+    const { title, metaDescription, siteName } = signals;
     const notices: string[] = [];
 
-    const title = normalizeWhitespace(extractTitle(html) || meta['og:title'] || '');
-    const metaDescription = normalizeWhitespace(meta['description'] || meta['og:description'] || '');
-    const htmlTag = /<html\b[^>]*>/i.exec(html)?.[0] || '';
-    const language = attr(htmlTag, 'lang');
-    const h1 = extractHeadings(html, 1);
-    const h2 = extractHeadings(html, 2);
-    const h3 = extractHeadings(html, 3);
-
-    const bodyMatch = /<body\b[^>]*>([\s\S]*?)<\/body>/i.exec(html);
-    const bodyHtml = bodyMatch ? bodyMatch[1] : html;
-    const visibleText = htmlToText(bodyHtml, { dropNavChrome: true });
-    const wordCount = (visibleText.match(/[\p{L}\p{N}]+/gu) || []).length;
-
-    if (wordCount < 80) {
+    if (signals.wordCount < 80) {
       notices.push(
         html.length > 60_000
           ? 'This page appears to render its content with JavaScript, so a static fetch may have missed text. ' +
@@ -663,49 +866,33 @@ export class SeoAnalyzer {
       );
     }
 
-    const { total: imageCount, missingAlt: imagesMissingAlt } = countImages(bodyHtml);
-    const { internal: internalLinks, external: externalLinks } = countLinks(bodyHtml, finalUrl);
-
-    const ogKeys = Object.keys(meta).filter((k) => k.startsWith('og:'));
-    const hasStructuredData = /<script\b[^>]*type\s*=\s*["']application\/ld\+json["']/i.test(html);
-
-    const sentences = splitSentences(visibleText);
-    const keywords = buildKeywords(visibleText, title, [...h1, ...h2, ...h3].join(' '));
+    const sentences = splitSentences(signals.visibleText);
+    const keywords = buildKeywords(
+      signals.visibleText,
+      title,
+      [...signals.h1, ...signals.h2, ...signals.h3].join(' ')
+    );
     const geoQuestions = extractQuestions(sentences);
 
     const page: SeoPageInfo = {
       title,
       metaDescription,
-      metaKeywords: meta['keywords'] || '',
-      language,
-      h1,
-      h2,
-      h3,
-      wordCount,
-      imageCount,
-      imagesMissingAlt,
-      internalLinks,
-      externalLinks,
-      hasCanonical: hasLinkRel(html, 'canonical'),
-      hasOpenGraph: ogKeys.length > 0,
-      hasTwitterCard: Object.keys(meta).some((k) => k.startsWith('twitter:')),
-      hasStructuredData,
-      openGraph: {
-        title: meta['og:title'],
-        description: meta['og:description'],
-        image: meta['og:image'],
-        type: meta['og:type'],
-      },
+      metaKeywords: signals.metaKeywords,
+      language: signals.language,
+      h1: signals.h1,
+      h2: signals.h2,
+      h3: signals.h3,
+      wordCount: signals.wordCount,
+      imageCount: signals.imageCount,
+      imagesMissingAlt: signals.imagesMissingAlt,
+      internalLinks: signals.internalLinks,
+      externalLinks: signals.externalLinks,
+      hasCanonical: signals.hasCanonical,
+      hasOpenGraph: signals.hasOpenGraph,
+      hasTwitterCard: signals.hasTwitterCard,
+      hasStructuredData: signals.hasStructuredData,
+      openGraph: signals.openGraph,
     };
-
-    let siteName = meta['og:site_name'] || '';
-    if (!siteName) {
-      try {
-        siteName = new URL(finalUrl).host.replace(/^www\./i, '');
-      } catch {
-        siteName = '';
-      }
-    }
 
     const hashtags = buildHashtags(keywords);
 
@@ -722,7 +909,7 @@ export class SeoAnalyzer {
           ? topPhrase.term
           : keywords[0]?.term || '';
 
-    return {
+    const report: SeoReport = {
       url: input,
       finalUrl,
       siteName,
@@ -739,5 +926,11 @@ export class SeoAnalyzer {
       issues: buildIssues(page),
       notices,
     };
+
+    if (opts.scope === 'site') {
+      report.site = await analyzeSite(finalUrl);
+    }
+
+    return report;
   }
 }

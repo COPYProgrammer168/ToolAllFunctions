@@ -1,14 +1,19 @@
 import React, { useState } from 'react';
 import {
   AlertTriangle,
+  Bot,
   Check,
   CheckCircle2,
   Copy,
   Download,
+  ExternalLink,
+  FileDown,
   Globe2,
   Hash,
   Heading1,
+  Layers,
   Loader2,
+  Map,
   MessageSquareText,
   Search,
   Sparkles,
@@ -16,8 +21,8 @@ import {
   TrendingUp,
   Wand2,
 } from 'lucide-react';
-import type { SeoReport } from '../types';
-import { analyzeSeoUrl } from '../services/api';
+import type { SeoAnalyzeScope, SeoReport, SeoSiteAudit, SitemapReport } from '../types';
+import { analyzeSeoUrl, generateSitemap } from '../services/api';
 
 /** Small color helper: green when a string length sits in the ideal range. */
 const charClass = (len: number, min: number, max: number): string =>
@@ -50,10 +55,14 @@ const CopyButton: React.FC<CopyButtonProps> = ({ id, text, copied, onCopy, label
 
 export const SeoStudioView: React.FC = () => {
   const [url, setUrl] = useState('');
+  const [scope, setScope] = useState<SeoAnalyzeScope>('site');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [report, setReport] = useState<SeoReport | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
+  const [sitemap, setSitemap] = useState<SitemapReport | null>(null);
+  const [isSitemapLoading, setIsSitemapLoading] = useState(false);
+  const [sitemapError, setSitemapError] = useState<string | null>(null);
 
   const handleCopy = async (id: string, text: string) => {
     try {
@@ -74,9 +83,11 @@ export const SeoStudioView: React.FC = () => {
 
     setError(null);
     setReport(null);
+    setSitemap(null);
+    setSitemapError(null);
     setIsAnalyzing(true);
     try {
-      const data = await analyzeSeoUrl(target);
+      const data = await analyzeSeoUrl(target, scope);
       setReport(data);
     } catch (err: any) {
       setError(err.message || 'The website could not be analyzed.');
@@ -95,6 +106,20 @@ export const SeoStudioView: React.FC = () => {
     URL.revokeObjectURL(a.href);
   };
 
+  const handleGenerateSitemap = async (targetUrl: string) => {
+    setIsSitemapLoading(true);
+    setSitemapError(null);
+    setSitemap(null);
+    try {
+      const data = await generateSitemap(targetUrl);
+      setSitemap(data);
+    } catch (err: any) {
+      setSitemapError(err.message || 'The sitemap could not be generated.');
+    } finally {
+      setIsSitemapLoading(false);
+    }
+  };
+
   return (
     <div className="space-y-6 max-w-5xl mx-auto">
       {/* Hero Header */}
@@ -105,8 +130,9 @@ export const SeoStudioView: React.FC = () => {
         </div>
         <h2 className="text-3xl sm:text-4xl font-extrabold text-sky-300 tracking-tight">SEO & GEO Studio</h2>
         <p className="text-sm text-neutral-400 max-w-2xl mx-auto leading-relaxed">
-          Paste any public website URL and generate SEO keywords, GEO (AI search) question phrasings, H1 titles,
-          meta descriptions, hashtags and ready-to-post captions — all derived from the live page content.
+          Paste any public website URL — even just the homepage — and the tool can crawl the whole site or focus on
+          that one page. You get SEO keywords, GEO (AI search) question phrasings, H1 titles, meta descriptions,
+          hashtags and ready-to-post captions, all derived from the live content.
         </p>
       </div>
 
@@ -137,6 +163,35 @@ export const SeoStudioView: React.FC = () => {
             {isAnalyzing ? 'Analyzing…' : 'Analyze Website'}
           </button>
         </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-[10px] uppercase tracking-wider text-neutral-500 font-semibold">Analyze</span>
+          <div className="flex rounded-xl overflow-hidden border border-white/10">
+            {(
+              [
+                { value: 'site', label: 'Whole site' },
+                { value: 'page', label: 'This page only' },
+              ] as const
+            ).map((opt) => (
+              <button
+                key={opt.value}
+                onClick={() => setScope(opt.value)}
+                disabled={isAnalyzing}
+                className={`px-3 py-1.5 text-[11px] font-semibold transition-all disabled:opacity-60 ${
+                  scope === opt.value
+                    ? 'bg-sky-500 text-neutral-950'
+                    : 'bg-white/5 text-neutral-400 hover:text-neutral-200 hover:bg-white/10'
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+          <span className="text-[10px] text-neutral-500">
+            {scope === 'site'
+              ? 'crawls up to 25 internal pages from this URL and audits every page'
+              : 'analyzes only the URL you entered'}
+          </span>
+        </div>
         <p className="text-[11px] text-neutral-500 leading-relaxed">
           Works with public article pages, landing pages and portfolios. JavaScript-only apps may return little text —
           the report tells you when that happens.
@@ -155,13 +210,28 @@ export const SeoStudioView: React.FC = () => {
       {isAnalyzing && (
         <div className="glass-panel p-10 rounded-2xl border border-white/[0.08] text-center space-y-3">
           <Loader2 className="w-8 h-8 animate-spin text-sky-300 mx-auto" />
-          <p className="text-sm font-semibold text-white">Fetching and analyzing the page…</p>
-          <p className="text-xs text-neutral-500">Extracting headings, keywords, metadata and deriving content ideas.</p>
+          <p className="text-sm font-semibold text-white">
+            {scope === 'site' ? 'Crawling and analyzing the whole site…' : 'Fetching and analyzing the page…'}
+          </p>
+          <p className="text-xs text-neutral-500">
+            {scope === 'site'
+              ? 'Discovering internal pages (up to 25), then auditing titles, descriptions, headings and keywords across all of them.'
+              : 'Extracting headings, keywords, metadata and deriving content ideas.'}
+          </p>
         </div>
       )}
 
       {report && !isAnalyzing && (
-        <SeoReportView report={report} copied={copied} onCopy={handleCopy} onDownload={downloadReport} />
+        <SeoReportView
+          report={report}
+          copied={copied}
+          onCopy={handleCopy}
+          onDownload={downloadReport}
+          sitemap={sitemap}
+          sitemapLoading={isSitemapLoading}
+          sitemapError={sitemapError}
+          onGenerateSitemap={() => handleGenerateSitemap(report.finalUrl)}
+        />
       )}
     </div>
   );
@@ -172,6 +242,10 @@ interface SeoReportViewProps {
   copied: string | null;
   onCopy: (id: string, text: string) => void;
   onDownload: () => void;
+  sitemap: SitemapReport | null;
+  sitemapLoading: boolean;
+  sitemapError: string | null;
+  onGenerateSitemap: () => void;
 }
 
 const Flag: React.FC<{ ok: boolean; label: string }> = ({ ok, label }) => (
@@ -211,7 +285,165 @@ const SectionCard: React.FC<{
   </div>
 );
 
-const SeoReportView: React.FC<SeoReportViewProps> = ({ report, copied, onCopy, onDownload }) => {
+const SiteAuditSection: React.FC<{
+  site: SeoSiteAudit;
+  copied: string | null;
+  onCopy: (id: string, text: string) => void;
+}> = ({ site, copied, onCopy }) => (
+  <SectionCard
+    icon={<Layers className="w-4 h-4" />}
+    title="Whole-site audit"
+    subtitle={`${site.pageCount} page${site.pageCount === 1 ? '' : 's'} crawled from the URL you entered`}
+    action={
+      site.siteKeywords.length > 0 ? (
+        <CopyButton
+          id="site-keywords"
+          text={site.siteKeywords.map((k) => k.term).join(', ')}
+          copied={copied}
+          onCopy={onCopy}
+          label="Copy site keywords"
+        />
+      ) : undefined
+    }
+  >
+    <div className="space-y-4">
+      {/* Totals */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5">
+        {[
+          { label: 'Pages', value: site.pageCount, warn: false },
+          { label: 'With issues', value: site.totals.issuePages, warn: site.totals.issuePages > 0 },
+          { label: 'Missing title', value: site.totals.missingTitles, warn: site.totals.missingTitles > 0 },
+          { label: 'Missing meta', value: site.totals.missingDescriptions, warn: site.totals.missingDescriptions > 0 },
+          { label: 'Missing H1', value: site.totals.missingH1, warn: site.totals.missingH1 > 0 },
+          { label: 'Thin pages', value: site.totals.thinPages, warn: site.totals.thinPages > 0 },
+        ].map((s) => (
+          <div key={s.label} className="bg-white/5 p-3 rounded-xl border border-white/5 text-center">
+            <p className="text-[10px] text-neutral-500 uppercase tracking-wider font-semibold">{s.label}</p>
+            <p className={`text-sm font-bold mt-1 ${s.warn ? 'text-amber-300' : 'text-emerald-300'}`}>{s.value}</p>
+          </div>
+        ))}
+      </div>
+
+      {/* Duplicate titles */}
+      {site.duplicateTitles.length > 0 && (
+        <div className="space-y-1.5">
+          <p className="text-[10px] uppercase tracking-wider text-neutral-500 font-semibold">
+            Duplicate titles ({site.duplicateTitles.length} group{site.duplicateTitles.length === 1 ? '' : 's'})
+          </p>
+          {site.duplicateTitles.map((g) => (
+            <div key={g.value} className="p-2.5 rounded-xl bg-amber-500/5 border border-amber-500/20 min-w-0">
+              <p className="text-xs text-amber-200 break-words">
+                “{g.value}” <span className="text-amber-400/80">— {g.urls.length} pages</span>
+              </p>
+              <p className="text-[10px] font-mono text-neutral-500 break-all">
+                {g.urls.slice(0, 3).join('  ')}
+                {g.urls.length > 3 ? ' …' : ''}
+              </p>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Duplicate meta descriptions */}
+      {site.duplicateDescriptions.length > 0 && (
+        <div className="space-y-1.5">
+          <p className="text-[10px] uppercase tracking-wider text-neutral-500 font-semibold">
+            Duplicate meta descriptions ({site.duplicateDescriptions.length} group
+            {site.duplicateDescriptions.length === 1 ? '' : 's'})
+          </p>
+          {site.duplicateDescriptions.map((g) => (
+            <div key={g.value} className="p-2.5 rounded-xl bg-amber-500/5 border border-amber-500/20 min-w-0">
+              <p className="text-xs text-amber-200 break-words">
+                “{g.value}” <span className="text-amber-400/80">— {g.urls.length} pages</span>
+              </p>
+              <p className="text-[10px] font-mono text-neutral-500 break-all">
+                {g.urls.slice(0, 3).join('  ')}
+                {g.urls.length > 3 ? ' …' : ''}
+              </p>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Per-page audit */}
+      <div className="space-y-2">
+        <p className="text-[10px] uppercase tracking-wider text-neutral-500 font-semibold">
+          Pages analyzed ({site.pages.length})
+        </p>
+        <div className="max-h-80 overflow-y-auto rounded-xl border border-white/10 divide-y divide-white/5">
+          {site.pages.map((p) => (
+            <div key={p.url} className="flex items-center gap-3 px-3 py-2 min-w-0">
+              <span
+                className={`w-9 shrink-0 text-center text-[10px] font-bold rounded-md py-1 ${
+                  p.issueCount === 0 ? 'bg-emerald-500/15 text-emerald-300' : 'bg-amber-500/15 text-amber-300'
+                }`}
+              >
+                {p.issueCount}
+              </span>
+              <div className="min-w-0 flex-1">
+                <a
+                  href={p.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-xs text-neutral-200 hover:text-sky-300 truncate block"
+                >
+                  {p.title || p.url.replace(/^https?:\/\/[^/]+/, '') || '/'}
+                </a>
+                <p className="text-[10px] font-mono text-neutral-500 truncate">{p.url}</p>
+              </div>
+              <span className="text-[10px] font-mono text-neutral-500 shrink-0">{p.wordCount.toLocaleString()} w</span>
+            </div>
+          ))}
+        </div>
+        <p className="text-[10px] text-neutral-600">
+          Badge = number of audit issues on that page. Click a page to open it.
+        </p>
+      </div>
+
+      {/* Site-wide keywords */}
+      {site.siteKeywords.length > 0 && (
+        <div className="space-y-2">
+          <p className="text-[10px] uppercase tracking-wider text-neutral-500 font-semibold">Top site-wide keywords</p>
+          <div className="flex flex-wrap gap-1.5">
+            {site.siteKeywords.slice(0, 12).map((k) => (
+              <button
+                key={k.term}
+                onClick={() => onCopy(`site-kw-${k.term}`, k.term)}
+                className={`px-2.5 py-1 rounded-full border text-[11px] transition-all ${
+                  copied === `site-kw-${k.term}`
+                    ? 'bg-emerald-500/15 border-emerald-400/40 text-emerald-300'
+                    : 'bg-sky-500/10 border-sky-400/20 text-sky-300 hover:bg-sky-500/20'
+                }`}
+                title="Click to copy"
+              >
+                {k.term} <span className="text-neutral-500">×{k.count}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Crawl notices */}
+      {site.notices.map((n, i) => (
+        <p key={i} className="text-[11px] text-amber-300 flex items-start gap-2">
+          <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+          <span className="break-words">{n}</span>
+        </p>
+      ))}
+    </div>
+  </SectionCard>
+);
+
+const SeoReportView: React.FC<SeoReportViewProps> = ({
+  report,
+  copied,
+  onCopy,
+  onDownload,
+  sitemap,
+  sitemapLoading,
+  sitemapError,
+  onGenerateSitemap,
+}) => {
   const { page } = report;
 
   const copyAllKeywords = report.seoKeywords.map((k) => k.term).join(', ');
@@ -233,13 +465,23 @@ const SeoReportView: React.FC<SeoReportViewProps> = ({ report, copied, onCopy, o
             {report.finalUrl}
           </a>
         </div>
-        <button
-          onClick={onDownload}
-          className="px-3.5 py-2 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-semibold text-neutral-200 transition-all flex items-center gap-1.5 shrink-0"
-        >
-          <Download className="w-3.5 h-3.5" />
-          Download report (.json)
-        </button>
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
+          <button
+            onClick={onGenerateSitemap}
+            disabled={sitemapLoading}
+            className="px-3.5 py-2 rounded-xl bg-sky-500 hover:bg-sky-400 disabled:opacity-60 text-neutral-950 text-xs font-bold transition-all flex items-center gap-1.5 shadow-lg shadow-sky-500/20"
+          >
+            {sitemapLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Map className="w-3.5 h-3.5" />}
+            {sitemapLoading ? 'Crawling site…' : 'Generate sitemap'}
+          </button>
+          <button
+            onClick={onDownload}
+            className="px-3.5 py-2 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-semibold text-neutral-200 transition-all flex items-center gap-1.5"
+          >
+            <Download className="w-3.5 h-3.5" />
+            Download report (.json)
+          </button>
+        </div>
       </div>
 
       {/* Notices */}
@@ -322,6 +564,9 @@ const SeoReportView: React.FC<SeoReportViewProps> = ({ report, copied, onCopy, o
           </ul>
         )}
       </SectionCard>
+
+      {/* Whole-site audit */}
+      {report.site && <SiteAuditSection site={report.site} copied={copied} onCopy={onCopy} />}
 
       {/* Keywords */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 min-w-0">
@@ -558,6 +803,151 @@ const SeoReportView: React.FC<SeoReportViewProps> = ({ report, copied, onCopy, o
           </div>
         )}
       </SectionCard>
+
+      {/* Sitemap generator */}
+      {sitemapError && (
+        <div className="p-4 rounded-2xl bg-red-500/10 border border-red-500/30 text-red-300 text-sm flex items-start gap-3">
+          <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+          <p className="break-words">{sitemapError}</p>
+        </div>
+      )}
+
+      {sitemapLoading && (
+        <div className="glass-panel p-10 rounded-2xl border border-white/[0.08] text-center space-y-3">
+          <Loader2 className="w-8 h-8 animate-spin text-sky-300 mx-auto" />
+          <p className="text-sm font-semibold text-white">Crawling the site for the sitemap…</p>
+          <p className="text-xs text-neutral-500">
+            Discovering internal pages (up to 60), checking robots.txt and existing sitemaps.
+          </p>
+        </div>
+      )}
+
+      {sitemap && !sitemapLoading && (
+        <SectionCard
+          icon={<Map className="w-4 h-4" />}
+          title="Sitemap & robots.txt"
+          subtitle={`${sitemap.pages.length} page${sitemap.pages.length === 1 ? '' : 's'} on ${sitemap.site} • generated ${new Date(
+            sitemap.generatedAt
+          ).toLocaleString()}`}
+          action={
+            <div className="flex flex-wrap gap-2">
+              <a
+                href={sitemap.downloads.xml}
+                className="px-3 py-1.5 rounded-lg bg-sky-500/15 hover:bg-sky-500/25 border border-sky-400/40 text-sky-300 text-[11px] font-semibold transition-all flex items-center gap-1.5"
+              >
+                <FileDown className="w-3 h-3" /> sitemap.xml
+              </a>
+              <a
+                href={sitemap.downloads.robots}
+                className="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-neutral-300 text-[11px] font-semibold transition-all flex items-center gap-1.5"
+              >
+                <FileDown className="w-3 h-3" /> robots.txt
+              </a>
+            </div>
+          }
+        >
+          <div className="space-y-4">
+            {/* The link to submit */}
+            <div className="p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-400/25 space-y-2 min-w-0">
+              <p className="text-[10px] uppercase tracking-wider text-emerald-300 font-semibold">
+                Your sitemap link (submit this)
+              </p>
+              <div className="flex flex-col sm:flex-row sm:items-center gap-2 min-w-0">
+                <a
+                  href={sitemap.sitemapUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-xs font-mono text-emerald-200 hover:text-emerald-100 flex-1 min-w-0 flex items-center gap-1.5"
+                >
+                  <ExternalLink className="w-3 h-3 shrink-0" />
+                  <span className="truncate">{sitemap.sitemapUrl}</span>
+                </a>
+                <CopyButton id="sitemap-link" text={sitemap.sitemapUrl} copied={copied} onCopy={onCopy} label="Copy link" />
+              </div>
+              <p className="text-[11px] text-emerald-200/70 leading-relaxed">
+                Upload the generated sitemap.xml to this address, then add the link in Google Search Console → Sitemaps.
+              </p>
+            </div>
+
+            {/* Existing sitemaps */}
+            <div className="space-y-2">
+              <p className="text-[10px] uppercase tracking-wider text-neutral-500 font-semibold flex items-center gap-1.5">
+                <Bot className="w-3 h-3" /> Existing sitemaps detected
+              </p>
+              {sitemap.existing.sitemapLinks.length === 0 ? (
+                <p className="text-xs text-neutral-500">
+                  None found
+                  {sitemap.existing.robotsFound ? ' (robots.txt has no Sitemap directive)' : ' (no robots.txt)'} — the
+                  generated file would be the site's first sitemap.
+                </p>
+              ) : (
+                <div className="flex flex-wrap gap-1.5">
+                  {sitemap.existing.sitemapLinks.map((l) => (
+                    <a
+                      key={l}
+                      href={l}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="px-2.5 py-1 rounded-lg bg-amber-500/10 border border-amber-400/25 text-amber-300 hover:bg-amber-500/20 text-[11px] font-mono truncate max-w-full"
+                    >
+                      {l}
+                    </a>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* robots.txt snippet */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-[10px] uppercase tracking-wider text-neutral-500 font-semibold">robots.txt snippet</p>
+                <CopyButton
+                  id="robots-snippet"
+                  text={sitemap.robotsSnippet}
+                  copied={copied}
+                  onCopy={onCopy}
+                  label="Copy snippet"
+                />
+              </div>
+              <pre className="p-3 rounded-xl bg-black/40 border border-white/10 text-[11px] font-mono text-neutral-300 overflow-x-auto whitespace-pre-wrap break-words">
+                {sitemap.robotsSnippet}
+              </pre>
+            </div>
+
+            {/* Pages */}
+            <div className="space-y-2">
+              <p className="text-[10px] uppercase tracking-wider text-neutral-500 font-semibold">
+                Pages in the sitemap ({sitemap.pages.length})
+              </p>
+              <div className="max-h-72 overflow-y-auto rounded-xl border border-white/10 divide-y divide-white/5">
+                {sitemap.pages.map((p) => (
+                  <div key={p.loc} className="flex items-center gap-3 px-3 py-2 min-w-0">
+                    <span className="w-7 text-[10px] font-mono text-neutral-600 shrink-0">d{p.depth}</span>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-xs text-neutral-200 truncate">
+                        {p.title || p.loc.replace(/^https?:\/\/[^/]+/, '') || '/'}
+                      </p>
+                      <p className="text-[10px] font-mono text-neutral-500 truncate">{p.loc}</p>
+                    </div>
+                    <span className="text-[10px] font-mono text-neutral-500 shrink-0">
+                      {p.priority.toFixed(1)}
+                      {p.lastmod ? ` • ${p.lastmod}` : ''}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Crawl notices */}
+            {sitemap.notices.map((n, i) => (
+              <p key={i} className="text-[11px] text-amber-300 flex items-start gap-2">
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                <span className="break-words">{n}</span>
+              </p>
+            ))}
+          </div>
+        </SectionCard>
+      )}
     </div>
   );
 };

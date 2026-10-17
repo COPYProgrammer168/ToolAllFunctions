@@ -375,6 +375,73 @@ export interface SeoReport {
   captions: SeoCaptionDraft[];
   issues: string[];
   notices: string[];
+  /** Present when the analysis ran in whole-site mode. */
+  site?: SeoSiteAudit;
+}
+
+export type SeoAnalyzeScope = 'page' | 'site';
+
+export interface SeoPageAudit {
+  url: string;
+  title: string;
+  metaDescription: string;
+  h1Count: number;
+  wordCount: number;
+  issueCount: number;
+  issues: string[];
+}
+
+export interface SeoDuplicateGroup {
+  value: string;
+  urls: string[];
+}
+
+export interface SeoSiteAudit {
+  pageCount: number;
+  pages: SeoPageAudit[];
+  duplicateTitles: SeoDuplicateGroup[];
+  duplicateDescriptions: SeoDuplicateGroup[];
+  siteKeywords: SeoKeyword[];
+  totals: {
+    issuePages: number;
+    missingTitles: number;
+    missingDescriptions: number;
+    missingH1: number;
+    multipleH1: number;
+    thinPages: number;
+  };
+  notices: string[];
+}
+
+/* ─── Sitemap generator ─── */
+
+export interface SitemapPage {
+  loc: string;
+  title: string;
+  lastmod?: string;
+  priority: number;
+  depth: number;
+}
+
+export interface SitemapExisting {
+  robotsFound: boolean;
+  robotsUrl: string;
+  sitemapLinks: string[];
+}
+
+export interface SitemapReport {
+  url: string;
+  site: string;
+  origin: string;
+  generatedAt: string;
+  /** Where the generated file should live once uploaded. */
+  sitemapUrl: string;
+  existing: SitemapExisting;
+  pages: SitemapPage[];
+  xml: string;
+  robotsSnippet: string;
+  downloads: { xml: string; robots: string };
+  notices: string[];
 }
 
 export type AppNavSection =
