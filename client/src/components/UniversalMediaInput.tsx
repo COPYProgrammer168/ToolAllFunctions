@@ -45,6 +45,28 @@ interface UniversalMediaInputProps {
 
 type BulkDownloadType = 'video' | 'audio';
 
+/**
+ * Format the "Download Track / Music" quick action downloads.
+ *
+ * Providers list the untouched progressive stream *and* a 320 kbps MP3 export
+ * (usually the "Original" card first), so "first MP3 entry" silently delivered
+ * the source bitrate — typically 128 kbps. Prefer the entry that actually
+ * carries a bitrate, so the file matches the 320 kbps music contract.
+ */
+function pickMusicFormat(formats: MediaFormatOption[]): MediaFormatOption | undefined {
+  const audio = formats.filter((f) => f.type === 'audio');
+  if (audio.length === 0) return formats[0];
+
+  const mp3s = audio.filter((f) => f.format?.toLowerCase() === 'mp3');
+  const withBitrate = audio.filter((f) => (f.bitrateKbps || 0) > 0);
+  const bestBitrate = withBitrate.reduce<MediaFormatOption | undefined>(
+    (best, f) => (!best || (f.bitrateKbps || 0) > (best.bitrateKbps || 0) ? f : best),
+    undefined
+  );
+
+  return mp3s.find((f) => (f.bitrateKbps || 0) > 0) || bestBitrate || mp3s[0] || audio[0];
+}
+
 export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
   onMediaSelect,
   onSendToOptimizer,
@@ -998,17 +1020,14 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
                 {analysis.mediaType === 'audio' ? (
                   <button
                     onClick={() => {
-                      const audioFmt =
-                        analysis.availableFormats.find((f) => f.type === 'audio' && f.format?.toLowerCase() === 'mp3') ||
-                        analysis.availableFormats.find((f) => f.type === 'audio') ||
-                        analysis.availableFormats[0];
+                      const audioFmt = pickMusicFormat(analysis.availableFormats);
                       if (audioFmt) handleDownload(audioFmt);
                     }}
                     disabled={actionsDisabled}
                     className="px-3.5 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-medium text-neutral-200 transition-all flex items-center gap-1.5"
                   >
                     <Download className="w-3.5 h-3.5 text-white" />
-                    {downloadingId === (analysis.availableFormats.find((f) => f.type === 'audio' && f.format?.toLowerCase() === 'mp3')?.id || analysis.availableFormats.find((f) => f.type === 'audio')?.id || analysis.availableFormats[0]?.id)
+                    {downloadingId === pickMusicFormat(analysis.availableFormats)?.id
                       ? 'Starting...'
                       : 'Download Track / Music'}
                   </button>

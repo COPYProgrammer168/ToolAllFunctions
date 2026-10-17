@@ -12,7 +12,7 @@ import { OptimizationPlanner } from '../services/OptimizationPlanner.js';
 import { JobManager } from '../services/JobManager.js';
 import { HardwareDetector } from '../services/HardwareDetector.js';
 import { MediaSourceResolver } from '../services/MediaSourceResolver.js';
-import { MediaJobManager, type MediaJobType } from '../services/MediaJobManager.js';
+import { MediaJobManager, type MediaJobType, type MediaJobRecord } from '../services/MediaJobManager.js';
 import { AudioExtractor } from '../services/AudioExtractor.js';
 import { AudioConverter } from '../services/AudioConverter.js';
 import { OutroDetector } from '../services/OutroDetector.js';
@@ -561,13 +561,19 @@ apiRouter.post('/media/download', async (req, res) => {
     const isAudioFromVideo = type === 'audio' && ['mp4', 'webm', 'mov', 'mkv', 'avi', 'm4v'].includes(sourceExt);
     const sourceFormat = isAudioFromVideo ? sourceExt : undefined;
 
+    const requestedBitrate =
+      customBitrate !== undefined && customBitrate !== null && customBitrate !== '' && Number(customBitrate) > 0
+        ? Number(customBitrate)
+        : undefined;
+
     const job = await MediaJobManager.createJobRecord(
       title || 'download',
       title || 'media',
       type as MediaJobType,
       format,
       sourceUrl,
-      sourceFormat
+      sourceFormat,
+      requestedBitrate
     );
 
     // Asynchronously begin streaming download and conversion
@@ -656,42 +662,10 @@ apiRouter.post('/media/download', async (req, res) => {
           stageName: 'Processing media...',
         });
 
-        if (type === 'image') {
-          // Image format conversion
-          if (format === 'original') {
-            await fs.copyFile(downloadedSource, job.outputPath);
-          } else {
-            await ImageProcessor.convert(downloadedSource, job.outputPath, format as SupportedImageFormat);
-          }
-        } else if (type === 'audio') {
-          // Audio extraction/conversion — source might be video or audio file
-          const audioFormat = (format === 'original' ? 'm4a' : format) as 'mp3' | 'm4a' | 'aac' | 'wav' | 'flac';
-          await AudioExtractor.extract({
-            inputPath: downloadedSource,
-            outputPath: job.outputPath,
-            format: audioFormat,
-            // Pass the requested bitrate through untouched: an explicit
-            // request (e.g. Music mode's 320 kbps) must survive the encoder
-            // instead of being dropped by a direct stream copy at the source
-            // bitrate. With no request the extractor still defaults to 320.
-            targetBitrateKbps: customBitrate ? Number(customBitrate) : undefined,
-            preferStreamCopy: true,
-          });
-        } else {
-          // Video: copy directly (already in target format)
-          if (muxUrls || downloadedSource === job.outputPath) {
-            // Already muxed to job.outputPath by ffmpeg above (or the HLS
-            // branch wrote the final file there directly).
-          } else if (format === 'original' || downloadedSource.endsWith(`.${format}`) || format === 'mp4') {
-            await fs.copyFile(downloadedSource, job.outputPath);
-          } else {
-            // If conversion needed, use ffmpeg to remux
-            const { exec: execCb } = await import('node:child_process');
-            const { promisify } = await import('node:util');
-            const execAsync = promisify(execCb);
-            await execAsync(`ffmpeg -y -i "${downloadedSource}" -c copy "${job.outputPath}"`);
-          }
-        }
+        await processJobOutput(job, downloadedSource, {
+          // The HLS / mux branches above already wrote the final file.
+          alreadyFinalized: !!muxUrls || downloadedSource === job.outputPath,
+        });
 
         const outStats = await fs.stat(job.outputPath);
         MediaJobManager.emitProgress(job.id, {
@@ -718,6 +692,71 @@ apiRouter.post('/media/download', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+/**
+ * Turns a downloaded source file into the job's final output.
+ *
+ * Shared by the initial download flow and the pause/resume flow: resuming used
+ * to copy the raw source straight over the output, which handed back the source
+ * bitrate/container (e.g. a 128 kbps MP3 for a job labelled "320 kbps").
+ */
+async function processJobOutput(
+  job: MediaJobRecord,
+  downloadedSource: string,
+  opts: { alreadyFinalized?: boolean } = {}
+): Promise<void> {
+  const { type, format } = job;
+
+  if (type === 'image') {
+    if (format === 'original') {
+      await fs.copyFile(downloadedSource, job.outputPath);
+    } else {
+      await ImageProcessor.convert(downloadedSource, job.outputPath, format as SupportedImageFormat);
+    }
+    return;
+  }
+
+  if (type === 'audio') {
+    // Audio extraction/conversion — the source may be a video or an audio file.
+    const audioFormat = (format === 'original' ? 'm4a' : format) as 'mp3' | 'm4a' | 'aac' | 'wav' | 'flac';
+    // MP3 exports are 320 kbps CBR across the app ("320 kbps (High Export)",
+    // "Download All → Music", …). An explicit request wins; without one the
+    // extractor would stream-copy the source stream — typically 128 kbps — and
+    // quietly deliver a low-bitrate file. Formats that mean "original stream"
+    // (m4a/flac/wav/'original') keep the lossless stream-copy behaviour.
+    const targetBitrateKbps =
+      job.customBitrate && job.customBitrate > 0
+        ? job.customBitrate
+        : audioFormat === 'mp3'
+          ? 320
+          : undefined;
+
+    await AudioExtractor.extract({
+      inputPath: downloadedSource,
+      outputPath: job.outputPath,
+      format: audioFormat,
+      targetBitrateKbps,
+      preferStreamCopy: true,
+    });
+    return;
+  }
+
+  // Video (and anything else): put the already-converted bytes in place.
+  if (opts.alreadyFinalized || downloadedSource === job.outputPath) {
+    // Already muxed to job.outputPath by ffmpeg above (or the HLS branch
+    // wrote the final file there directly).
+    return;
+  }
+  if (format === 'original' || downloadedSource.endsWith(`.${format}`) || format === 'mp4') {
+    await fs.copyFile(downloadedSource, job.outputPath);
+    return;
+  }
+  // Different container requested — remux without re-encoding.
+  const { exec: execCb } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const execAsync = promisify(execCb);
+  await execAsync(`ffmpeg -y -i "${downloadedSource}" -c copy "${job.outputPath}"`);
+}
 
 /**
  * Detect source media format from a URL to use proper file extensions
@@ -797,7 +836,14 @@ apiRouter.post('/media/jobs/:id/resume', async (req, res) => {
   (async () => {
     try {
       await MediaJobManager.startResumableDownload(job.id, job.downloadMeta!.remoteUrl);
-      await fs.copyFile(job.sourcePath, job.outputPath);
+      MediaJobManager.emitProgress(job.id, {
+        status: 'CONVERTING',
+        stageName: 'Processing media...',
+      });
+      // Same conversion the initial flow runs — copying the raw source here
+      // would publish a file at the source bitrate (128 kbps music) and in the
+      // source container instead of the requested one.
+      await processJobOutput(job, job.sourcePath);
       const outStats = await fs.stat(job.outputPath);
       MediaJobManager.emitProgress(job.id, {
         status: 'COMPLETED',

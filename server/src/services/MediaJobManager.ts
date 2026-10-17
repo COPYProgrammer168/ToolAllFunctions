@@ -46,6 +46,12 @@ export interface MediaJobRecord {
   sourcePath: string;
   outputPath: string;
   format: string;
+  /**
+   * Audio bitrate requested by the client for this job (kbps). Persisted so a
+   * paused/resumed job is re-encoded to the same target instead of being
+   * stream-copied at the source bitrate.
+   */
+  customBitrate?: number;
   progress: MediaJobProgress;
   createdAt: number;
   completedAt?: number;
@@ -182,7 +188,8 @@ export class MediaJobManager {
     type: MediaJobType,
     format: string,
     sourceUrl?: string,
-    sourceFormat?: string
+    sourceFormat?: string,
+    customBitrate?: number
   ): Promise<MediaJobRecord> {
     const id = nanoid(10);
     const safeTitle = sanitizeFilename(title);
@@ -220,6 +227,7 @@ export class MediaJobManager {
       sourcePath,
       outputPath,
       format,
+      customBitrate,
       progress: {
         status: 'QUEUED',
         percent: 0,

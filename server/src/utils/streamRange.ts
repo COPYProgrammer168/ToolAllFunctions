@@ -65,6 +65,16 @@ export interface ChunkedDownloadResult {
   contentType?: string;
 }
 
+/**
+ * Parses the total size from an unsatisfied-range response,
+ * i.e. `Content-Range: bytes * /123456` sent with a 416.
+ */
+function parseUnsatisfiedTotal(header: string | null | undefined): number | undefined {
+  if (!header) return undefined;
+  const match = /bytes\s+\*\/(\d+)/i.exec(header);
+  return match ? Number(match[1]) : undefined;
+}
+
 /** Pipes a web body into the file stream, counting bytes as they land. */
 async function writeBody(
   body: ReadableStream<Uint8Array> | null,
@@ -125,6 +135,21 @@ export async function streamDownloadToFile(
       });
 
       if (!response.ok && response.status !== 206) {
+        // 416 = the requested window starts at/after the end of the object.
+        // That is exactly what a resumed, already-complete download sends, so
+        // treat "we already have every byte" as finished instead of failing.
+        if (response.status === 416 && received > 0) {
+          await response.body?.cancel().catch(() => {});
+          const total = parseUnsatisfiedTotal(response.headers.get('content-range'));
+          if (total !== undefined && received >= total) {
+            totalBytes = total;
+            break;
+          }
+          // Stale partial file that no longer matches the remote object:
+          // drop it and fetch the whole thing again.
+          await reopenFromScratch();
+          continue;
+        }
         // The open-ended window was refused; retry with a bounded one.
         if (useOpenEnded) continue;
         throw new Error(`Remote server responded with HTTP ${response.status} ${response.statusText}`);
