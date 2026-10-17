@@ -55,29 +55,29 @@ export const Navbar: React.FC<NavbarProps> = ({
     <header className="sticky top-0 z-30 w-full border-b border-white/[0.06] bg-neutral-950/85 backdrop-blur-xl">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
         {/* Left: Mobile Toggle & Brand */}
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 min-w-0">
           <button
             onClick={onToggleSidebar}
-            className="p-2 rounded-xl bg-white/5 hover:bg-white/10 text-neutral-300 lg:hidden border border-white/5"
+            className="p-2 rounded-xl bg-white/5 hover:bg-white/10 text-neutral-300 lg:hidden border border-white/5 shrink-0"
             aria-label="Toggle Navigation Menu"
           >
             <Menu className="w-5 h-5" />
           </button>
 
           <div
-            className="flex items-center gap-3 cursor-pointer group"
+            className="flex items-center gap-3 cursor-pointer group min-w-0"
             onClick={() => onSelectSection('studio-optimize')}
           >
-            <div className="relative flex items-center justify-center group-hover:scale-105 transition-transform duration-300">
+            <div className="relative flex items-center justify-center group-hover:scale-105 transition-transform duration-300 shrink-0">
               <LogoMark />
               <div className="absolute inset-0 rounded-xl bg-white/10 blur-md -z-10 opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
             </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="font-bold text-lg tracking-tight bg-gradient-to-r from-white via-neutral-100 to-neutral-400 bg-clip-text text-transparent">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="font-bold text-lg tracking-tight bg-gradient-to-r from-white via-neutral-100 to-neutral-400 bg-clip-text text-transparent truncate">
                   VideoOptimize
                 </span>
-                <span className="text-[10px] uppercase font-mono tracking-wider px-1.5 py-0.5 rounded bg-white/10 text-white border border-white/20">
+                <span className="text-[10px] uppercase font-mono tracking-wider px-1.5 py-0.5 rounded bg-white/10 text-white border border-white/20 shrink-0 hidden sm:inline-block">
                   TOOLKIT
                 </span>
               </div>
@@ -124,7 +124,7 @@ export const Navbar: React.FC<NavbarProps> = ({
         </div>
 
         {/* Right Status */}
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 shrink-0">
           {hasActiveVideo && (
             <button
               onClick={onReset}

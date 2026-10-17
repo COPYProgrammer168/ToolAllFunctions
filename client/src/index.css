@@ -46,6 +46,13 @@ h1, h2, h3, h4, .font-display {
    src/assets/fonts/FONT-LICENSES.md for full attribution).
    ═══════════════════════════════════════════════════════════════════════════ */
    
+/* Views are rendered as flex items inside <main>; without an explicit floor
+   their content-based minimum width wins over the viewport, so one wide row
+   (a tab strip, a nav list) drags the whole page sideways on small screens. */
+main > * {
+  min-width: 0;
+}
+
 /* ─── Typography & Accents ─── */
 .text-gradient {
   @apply bg-gradient-to-r from-white via-neutral-300 to-neutral-500 bg-clip-text text-transparent;

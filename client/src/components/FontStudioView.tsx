@@ -341,7 +341,7 @@ export const FontStudioView: React.FC = () => {
   const copyableCount = results.length;
 
   return (
-    <div className="space-y-6 max-w-7xl mx-auto">
+    <div className="space-y-6 max-w-7xl w-full min-w-0 mx-auto">
       {/* ── Header ── */}
       <div className="text-center space-y-2">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full border text-cyan-300 bg-cyan-500/10 border-cyan-500/30 text-xs font-semibold uppercase tracking-wider">
@@ -357,7 +357,7 @@ export const FontStudioView: React.FC = () => {
       </div>
 
       {/* ── Input ── */}
-      <section className="glass-panel p-5 rounded-2xl border border-white/[0.08] space-y-3">
+      <section className="glass-panel p-4 sm:p-5 rounded-2xl border border-white/[0.08] space-y-3">
         <div className="flex items-center justify-between gap-3">
           <label htmlFor="font-studio-input" className="text-xs font-bold uppercase tracking-wider text-neutral-300 flex items-center gap-2">
             <Type className="w-3.5 h-3.5 text-cyan-400" />
@@ -392,11 +392,10 @@ export const FontStudioView: React.FC = () => {
             <X className="w-3.5 h-3.5" />
             Clear
           </button>
-          <div className="flex-1" />
           <button
             onClick={handleCopyAll}
             disabled={copyableCount === 0}
-            className="px-4 py-2 rounded-xl bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/40 text-xs font-bold text-cyan-200 transition-all flex items-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed"
+            className="ml-auto px-4 py-2 rounded-xl bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/40 text-xs font-bold text-cyan-200 transition-all flex items-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <Copy className="w-3.5 h-3.5" />
             Copy All ({copyableCount})
@@ -415,7 +414,7 @@ export const FontStudioView: React.FC = () => {
       </section>
 
       {/* ── Controls ── */}
-      <section className="glass-panel p-5 rounded-2xl border border-white/[0.08] space-y-4">
+      <section className="glass-panel p-4 sm:p-5 rounded-2xl border border-white/[0.08] space-y-4">
         {/* Categories */}
         <div className="flex gap-1.5 overflow-x-auto no-scrollbar pb-1 -mx-1 px-1" role="tablist" aria-label="Style categories">
           {[{ id: 'all' as const, name: 'All Styles' }, ...FONT_STYLE_CATEGORIES].map((cat) => (
@@ -582,7 +581,7 @@ export const FontStudioView: React.FC = () => {
 
       {status === 'ready' && results.length > 0 && (
         <section className="space-y-4" aria-label="Generated styles">
-          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
             {results.slice(0, visibleCount).map((result) => (
               <FontStyleCard
                 key={result.styleId}

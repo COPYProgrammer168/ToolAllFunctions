@@ -167,8 +167,11 @@ export const SidebarNavigation: React.FC<SidebarNavigationProps> = ({
     <nav className={`sticky top-16 z-20 bg-neutral-950/95 backdrop-blur-xl border-b border-white/[0.06] lg:block ${isOpenMobile ? 'block' : 'hidden'}`}>
       <div className="mx-auto px-4 sm:px-6 lg:px-8 py-2 flex flex-col gap-y-3 lg:flex-row lg:flex-wrap lg:gap-x-6 lg:gap-y-2">
         {sections.map((section) => (
-          <div key={section.group} className="flex flex-col gap-y-1 lg:flex-row lg:items-center lg:gap-1.5 shrink-0">
-            <p className="text-[9px] font-mono font-bold tracking-wider text-neutral-600 uppercase mr-0.5">
+          <div
+            key={section.group}
+            className="flex flex-col gap-y-1 lg:flex-row lg:flex-wrap lg:items-center lg:gap-1.5 min-w-0"
+          >
+            <p className="text-[9px] font-mono font-bold tracking-wider text-neutral-600 uppercase mr-0.5 lg:shrink-0">
               {section.group}
             </p>
             {section.items.map((item) => {
