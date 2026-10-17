@@ -448,6 +448,7 @@ export type AppNavSection =
   | 'studio-optimize'
   | 'seo-studio'
   | 'font-studio'
+  | 'qr-studio'
   | 'pdf-to-word'
   | 'media-hub'
   | 'media-video-to-music'

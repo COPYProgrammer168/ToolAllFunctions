@@ -651,3 +651,89 @@ export async function uploadFileChunked(
   return finalResponse;
 }
 
+// ============================================================================
+// QR CODE GENERATOR — hosted file links
+// ============================================================================
+
+/** A file stored on the server, addressable by the URL encoded into a QR code. */
+export interface QrHostedFile {
+  id: string;
+  /** Site-relative URL, e.g. `/api/tools/qr-files/f/<id>`. */
+  url: string;
+  name: string;
+  size: number;
+  mime: string;
+}
+
+/**
+ * Uploads a file to be hosted for a QR code and returns its public URL.
+ *
+ * Uses XMLHttpRequest rather than fetch so the upload can report progress —
+ * same reason `analyzeVideoFile` does.
+ */
+export function uploadQrFile(
+  file: File,
+  onUploadProgress?: (percent: number) => void
+): Promise<QrHostedFile> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const formData = new FormData();
+    formData.append('file', file);
+
+    xhr.open('POST', '/api/tools/qr-files/upload');
+
+    if (xhr.upload && onUploadProgress) {
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) {
+          onUploadProgress(Math.round((e.loaded / e.total) * 100));
+        }
+      };
+    }
+
+    xhr.onload = () => {
+      let body: Record<string, any> = {};
+      try {
+        body = JSON.parse(xhr.responseText);
+      } catch {
+        /* non-JSON error page — fall through to the status check */
+      }
+
+      if (xhr.status >= 200 && xhr.status < 300 && body.url) {
+        resolve(body as QrHostedFile);
+        return;
+      }
+
+      if (xhr.status === 413) {
+        reject(new MediaApiError(body.message || 'That file is too large to host.', { status: 413 }));
+        return;
+      }
+      if (xhr.status === 429) {
+        reject(
+          new MediaApiError(body.message || 'Too many uploads. Try again shortly.', {
+            status: 429,
+            code: 'rate_limited',
+            retryAfter: Number(body.retry_after) || undefined,
+          })
+        );
+        return;
+      }
+      reject(
+        new MediaApiError(body.message || body.error || `Upload failed (HTTP ${xhr.status})`, {
+          status: xhr.status,
+        })
+      );
+    };
+
+    xhr.onerror = () => reject(new Error('Network error during upload'));
+    xhr.send(formData);
+  });
+}
+
+/** Builds the absolute URL a phone should open after scanning. */
+export function absoluteQrFileUrl(relativeUrl: string): string {
+  if (!relativeUrl) return '';
+  if (/^https?:\/\//i.test(relativeUrl)) return relativeUrl;
+  if (typeof window === 'undefined') return relativeUrl;
+  return new URL(relativeUrl, window.location.origin).toString();
+}
+

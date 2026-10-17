@@ -14,6 +14,7 @@ import {
   ShieldCheck,
   FileText,
   Captions,
+  QrCode,
 } from 'lucide-react';
 import type { AppNavSection } from '../types';
 
@@ -37,6 +38,15 @@ export const MediaHubView: React.FC<MediaHubViewProps> = ({ onNavigate }) => {
       icon: FileText,
       color: 'from-amber-500/20 to-orange-500/10 text-amber-400 border-amber-500/30',
       titleColor: 'text-amber-300',
+    },
+    {
+      id: 'qr-studio' as AppNavSection,
+      title: 'QR Studio',
+      badge: 'Logo & Styles',
+      desc: 'Generate QR codes from a URL, hosted file, Wi-Fi or contact card — with a centre logo, custom colours and print-ready export.',
+      icon: QrCode,
+      color: 'from-purple-500/20 to-violet-500/10 text-purple-400 border-purple-500/30',
+      titleColor: 'text-purple-300',
     },
     {
       id: 'media-video-to-music' as AppNavSection,

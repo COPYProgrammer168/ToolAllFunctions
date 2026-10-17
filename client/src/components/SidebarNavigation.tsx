@@ -16,6 +16,7 @@ import {
   Type,
   FileText,
   Captions,
+  QrCode,
 } from 'lucide-react';
 import type { AppNavSection } from '../types';
 
@@ -65,6 +66,12 @@ export const SidebarNavigation: React.FC<SidebarNavigationProps> = ({
           label: 'PDF to Word',
           icon: FileText,
           accent: 'text-amber-400',
+        },
+        {
+          id: 'qr-studio' as AppNavSection,
+          label: 'QR Studio',
+          icon: QrCode,
+          accent: 'text-purple-400',
         },
       ],
     },

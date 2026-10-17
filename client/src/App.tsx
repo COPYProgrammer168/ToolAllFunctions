@@ -26,6 +26,7 @@ import { FontStudioView } from './components/FontStudioView';
 import { PdfToWordView } from './components/PdfToWordView';
 import { CaptionStudioView } from './components/CaptionStudioView';
 import { SeoStudioView } from './components/SeoStudioView';
+import { QrCodeView } from './components/QrCodeView';
 
 import {
   analyzeVideoFile,
@@ -336,6 +337,9 @@ function App() {
 
           {/* VIEW: PDF TO WORD CONVERTER */}
           {activeSection === 'pdf-to-word' && <PdfToWordView />}
+
+          {/* VIEW: QR STUDIO */}
+          {activeSection === 'qr-studio' && <QrCodeView />}
 
           {/* VIEW: STUDIO VIDEO OPTIMIZER */}
           {activeSection === 'studio-optimize' && (

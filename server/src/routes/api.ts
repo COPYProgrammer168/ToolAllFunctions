@@ -28,6 +28,7 @@ import { downloadToFile } from '../utils/httpDownload.js';
 import { buildStreamHeaders, getStreamCredentials } from '../services/StreamCredentials.js';
 import { ffprobeBin, ffmpegBin } from '../utils/binaries.js';
 import { pdfToWordRouter } from '../modules/pdf-to-word/routes.js';
+import { qrFilesRouter } from '../modules/qr-files/routes.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -64,6 +65,8 @@ const upload = multer({
 export const apiRouter = Router();
 apiRouter.use('/tools/pdf-to-word', pdfToWordRouter);
 apiRouter.use('/pdf-to-word', pdfToWordRouter);
+apiRouter.use('/tools/qr-files', qrFilesRouter);
+apiRouter.use('/qr-files', qrFilesRouter);
 
 /**
  * Translate an error into an API response. Errors that carry an HTTP status
