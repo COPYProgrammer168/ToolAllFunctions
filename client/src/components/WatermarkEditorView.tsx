@@ -143,12 +143,12 @@ export const WatermarkEditorView: React.FC<WatermarkEditorViewProps> = ({
         </div>
       ) : (
         <div className="glass-panel p-6 rounded-2xl border border-white/[0.08] space-y-6">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-white/10 border border-white/20 flex items-center justify-center text-white">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="w-10 h-10 rounded-xl bg-white/10 border border-white/20 flex items-center justify-center text-white shrink-0">
                 <Film className="w-5 h-5" />
               </div>
-              <div>
+              <div className="min-w-0">
                 <h4 className="text-sm font-bold text-white truncate max-w-md">{videoName}</h4>
                 <p className="text-xs font-mono text-neutral-400">User-owned video source</p>
               </div>
@@ -158,7 +158,7 @@ export const WatermarkEditorView: React.FC<WatermarkEditorViewProps> = ({
                 setVideoPath(null);
                 setResult(null);
               }}
-              className="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-xs text-neutral-300"
+              className="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-xs text-neutral-300 shrink-0"
             >
               Change Video
             </button>
@@ -199,7 +199,7 @@ export const WatermarkEditorView: React.FC<WatermarkEditorViewProps> = ({
 
           {/* Watermark Region Presets */}
           <div className="space-y-3">
-            <div className="flex justify-between items-center">
+            <div className="flex flex-col items-start gap-1 sm:flex-row sm:items-center sm:justify-between">
               <label className="text-xs font-bold uppercase tracking-wider text-neutral-300">
                 Watermark Region Location
               </label>
@@ -269,9 +269,9 @@ export const WatermarkEditorView: React.FC<WatermarkEditorViewProps> = ({
           {/* Result Card */}
           {result && (
             <div className="p-5 rounded-2xl bg-white/10 border border-white/20 space-y-4">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <div className="w-9 h-9 rounded-xl bg-white/20 text-white flex items-center justify-center">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="w-9 h-9 rounded-xl bg-white/20 text-white flex items-center justify-center shrink-0">
                     <CheckCircle2 className="w-5 h-5" />
                   </div>
                   <div>
@@ -280,7 +280,7 @@ export const WatermarkEditorView: React.FC<WatermarkEditorViewProps> = ({
                   </div>
                 </div>
 
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <a
                     href={result.downloadUrl}
                     download

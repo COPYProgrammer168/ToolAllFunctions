@@ -30,9 +30,18 @@ function getDb() {
       createdAt INTEGER,
       completedAt INTEGER,
       progress TEXT,
-      downloadMeta TEXT
+      downloadMeta TEXT,
+      customBitrate INTEGER
     )
   `);
+    // Migrate databases created before the audio bitrate was persisted — resume
+    // needs it to re-encode a paused music job to the requested kbps.
+    try {
+        db.exec('ALTER TABLE media_jobs ADD COLUMN customBitrate INTEGER');
+    }
+    catch {
+        /* column already exists */
+    }
     return db;
 }
 export function loadJobs() {
@@ -76,17 +85,19 @@ export function loadJobs() {
             completedAt: r.completedAt || undefined,
             progress,
             downloadMeta,
+            customBitrate: r.customBitrate ?? undefined,
         };
     });
 }
 export function saveJob(job) {
     const db = getDb();
-    db.prepare(`INSERT INTO media_jobs (id, title, filename, type, sourceUrl, jobDir, sourcePath, outputPath, format, createdAt, completedAt, progress, downloadMeta)
-     VALUES (@id, @title, @filename, @type, @sourceUrl, @jobDir, @sourcePath, @outputPath, @format, @createdAt, @completedAt, @progress, @downloadMeta)
+    db.prepare(`INSERT INTO media_jobs (id, title, filename, type, sourceUrl, jobDir, sourcePath, outputPath, format, createdAt, completedAt, progress, downloadMeta, customBitrate)
+     VALUES (@id, @title, @filename, @type, @sourceUrl, @jobDir, @sourcePath, @outputPath, @format, @createdAt, @completedAt, @progress, @downloadMeta, @customBitrate)
      ON CONFLICT(id) DO UPDATE SET
        title=excluded.title, filename=excluded.filename, type=excluded.type, sourceUrl=excluded.sourceUrl,
        jobDir=excluded.jobDir, sourcePath=excluded.sourcePath, outputPath=excluded.outputPath, format=excluded.format,
-       createdAt=excluded.createdAt, completedAt=excluded.completedAt, progress=excluded.progress, downloadMeta=excluded.downloadMeta`).run({
+       createdAt=excluded.createdAt, completedAt=excluded.completedAt, progress=excluded.progress, downloadMeta=excluded.downloadMeta,
+       customBitrate=excluded.customBitrate`).run({
         id: job.id,
         title: job.title,
         filename: job.filename,
@@ -100,6 +111,7 @@ export function saveJob(job) {
         completedAt: job.completedAt || null,
         progress: JSON.stringify(job.progress),
         downloadMeta: job.downloadMeta ? JSON.stringify(job.downloadMeta) : null,
+        customBitrate: job.customBitrate ?? null,
     });
 }
 export function deleteJobRow(id) {

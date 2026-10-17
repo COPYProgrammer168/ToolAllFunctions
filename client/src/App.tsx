@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Play, Pause, Download, Sparkles } from 'lucide-react';
+import { Play, Pause, Download, Sparkles, Captions } from 'lucide-react';
 import { Navbar } from './components/Navbar';
 import { BackgroundFX } from './components/BackgroundFX';
 import { MusicPlayerBar } from './components/MusicPlayerBar';
@@ -21,10 +21,10 @@ import { AudioEditorView } from './components/AudioEditorView';
 import { WatermarkEditorView } from './components/WatermarkEditorView';
 import { OutroEditorView } from './components/OutroEditorView';
 import { DownloadManagerView } from './components/DownloadManagerView';
-import { BlenderView } from './components/BlenderView';
 import { MediaSettingsModal } from './components/MediaSettingsModal';
 import { FontStudioView } from './components/FontStudioView';
 import { PdfToWordView } from './components/PdfToWordView';
+import { CaptionStudioView } from './components/CaptionStudioView';
 
 import {
   analyzeVideoFile,
@@ -45,6 +45,7 @@ import type {
   AppNavSection,
   MediaFormatOption,
 } from './types';
+import { configForPreset, recommendedPresetFor } from './services/presetConfig';
 import './App.css';
 
 type AppView = 'IDLE' | 'ANALYZING' | 'WORKSPACE' | 'PROCESSING' | 'RESULT';
@@ -115,6 +116,17 @@ function App() {
   }, []);
 
   // Handlers for Video Optimizer
+  /**
+   * Applies the pipeline defaults the analysis implies: a 4K landscape source
+   * gets the 4K YouTube preset (3840×2160 @ 60 FPS); everything else — including
+   * 4K vertical sources — targets the platform-ready 9:16 1080×1920 at 60 FPS,
+   * because TikTok/Reels/Shorts only accept 1080-wide uploads.
+   */
+  const applyRecommendedConfig = useCallback((metadata: OptimizationReport['metadata']) => {
+    const preset = recommendedPresetFor(metadata);
+    setConfig((c) => ({ ...c, ...configForPreset(preset) }));
+  }, []);
+
   const handleFileSelect = async (file: File) => {
     setView('ANALYZING');
     setOriginalName(file.name);
@@ -122,6 +134,7 @@ function App() {
       const data = await analyzeVideoFile(file, (p) => setUploadProgress(p));
       setReport(data.report);
       setTempPath(data.tempPath);
+      applyRecommendedConfig(data.report.metadata);
       setView('WORKSPACE');
       setActiveTab('optimize');
     } catch (err: any) {
@@ -139,6 +152,7 @@ function App() {
       setReport(data.report);
       setTempPath(data.tempPath);
       setOriginalName(data.originalName);
+      applyRecommendedConfig(data.report.metadata);
       setView('WORKSPACE');
       setActiveTab('optimize');
     } catch (err: any) {
@@ -150,6 +164,13 @@ function App() {
   const handleConfigChange = useCallback((partial: Partial<JobConfig>) => {
     setConfig((c) => ({ ...c, ...partial }));
   }, []);
+
+  /** "Apply Recommendation" on the Smart Recommendation card. */
+  const handleApplyRecommendation = useCallback(() => {
+    if (!report) return;
+    const preset = recommendedPresetFor(report.metadata);
+    setConfig((c) => ({ ...c, mode: 'smart', ...configForPreset(preset) }));
+  }, [report]);
 
   const startOptimization = async (isPreview = false) => {
     if (!tempPath) return;
@@ -210,6 +231,7 @@ function App() {
       setReport(data.report);
       setTempPath(data.tempPath);
       setOriginalName(data.originalName);
+      applyRecommendedConfig(data.report.metadata);
       setActiveSection('studio-optimize');
       setView('WORKSPACE');
       setActiveTab('optimize');
@@ -223,6 +245,13 @@ function App() {
     setCrossMediaVideoName(name);
     setCrossMediaVideoArtist(artist || '');
     setActiveSection('media-video-to-music');
+  };
+
+  /** Opens the Captions Studio with a specific video already attached. */
+  const handleGenerateCaptions = (filePath: string, name: string) => {
+    setCrossMediaVideoPath(filePath);
+    setCrossMediaVideoName(name);
+    setActiveSection('media-captions');
   };
 
   const handleDirectDownload = async (format: MediaFormatOption) => {
@@ -366,7 +395,7 @@ function App() {
                         <>
                           <SmartRecommendation
                             report={report}
-                            onApply={() => handleConfigChange({ mode: 'smart', preset: 'tiktok' })}
+                            onApply={handleApplyRecommendation}
                             onCustomize={() => {
                               setActiveTab('optimize');
                               setTimeout(() => {
@@ -649,6 +678,19 @@ function App() {
                           Extract Audio from this Video
                         </button>
 
+                        <button
+                          onClick={() =>
+                            handleGenerateCaptions(
+                              `storage/jobs/${currentJobId}/optimized_${currentJobId}.mp4`,
+                              originalName
+                            )
+                          }
+                          className="w-full py-2.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-semibold text-neutral-200 transition-all flex items-center justify-center gap-2"
+                        >
+                          <Captions className="w-3.5 h-3.5 text-neutral-300" />
+                          Generate Captions from this Video
+                        </button>
+
                         <div className="grid grid-cols-2 gap-2">
                           <button
                             onClick={() => setView('WORKSPACE')}
@@ -724,6 +766,14 @@ function App() {
             />
           )}
 
+          {/* VIEW: VIDEO CAPTIONS STUDIO */}
+          {activeSection === 'media-captions' && (
+            <CaptionStudioView
+              initialVideoPath={crossMediaVideoPath || undefined}
+              initialVideoName={crossMediaVideoName || undefined}
+            />
+          )}
+
           {/* VIEW: OUTRO TRIMMER */}
           {activeSection === 'media-outro' && (
             <OutroEditorView
@@ -732,9 +782,6 @@ function App() {
               onSendToOptimizer={handleSendToOptimizer}
             />
           )}
-
-          {/* VIEW: BLENDER 3D STUDIO */}
-          {activeSection === 'blender-3d' && <BlenderView />}
 
           {/* VIEW: DOWNLOAD MANAGER */}
           {activeSection === 'media-downloads' && (

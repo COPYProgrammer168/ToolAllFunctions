@@ -144,12 +144,12 @@ export const OutroEditorView: React.FC<OutroEditorViewProps> = ({
         </div>
       ) : (
         <div className="glass-panel p-6 rounded-2xl border border-white/[0.08] space-y-6">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-white/10 border border-white/20 flex items-center justify-center text-white">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="w-10 h-10 rounded-xl bg-white/10 border border-white/20 flex items-center justify-center text-white shrink-0">
                 <Film className="w-5 h-5" />
               </div>
-              <div>
+              <div className="min-w-0">
                 <h4 className="text-sm font-bold text-white truncate max-w-md">{videoName}</h4>
                 <p className="text-xs font-mono text-neutral-400">Total Duration: {formatSec(totalDuration)}</p>
               </div>
@@ -158,7 +158,7 @@ export const OutroEditorView: React.FC<OutroEditorViewProps> = ({
             <button
               onClick={handleScanOutro}
               disabled={isScanning}
-              className="px-3.5 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-medium text-neutral-200 transition-all flex items-center gap-1.5"
+              className="px-3.5 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-medium text-neutral-200 transition-all flex items-center gap-1.5 shrink-0"
             >
               {isScanning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5 text-white" />}
               Re-Scan Outro
@@ -168,9 +168,9 @@ export const OutroEditorView: React.FC<OutroEditorViewProps> = ({
           {/* Smart Outro Detection Card */}
           {detectedOutro && detectedOutro.detected && (
             <div className="p-5 rounded-2xl bg-white/10 border border-white/25 space-y-3">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Sparkles className="w-4 h-4 text-white" />
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2 min-w-0">
+                  <Sparkles className="w-4 h-4 text-white shrink-0" />
                   <h4 className="text-xs font-bold uppercase tracking-wider text-white">
                     Smart Outro Detected
                   </h4>
@@ -189,7 +189,7 @@ export const OutroEditorView: React.FC<OutroEditorViewProps> = ({
                 </p>
               </div>
 
-              <div className="flex items-center gap-2 pt-1">
+              <div className="flex flex-wrap items-center gap-2 pt-1">
                 <button
                   onClick={() => setCutTime(detectedOutro.suggestedCutTime)}
                   className="px-4 py-2 rounded-xl bg-white hover:bg-white text-neutral-950 text-xs font-bold transition-all shadow-md shadow-white/20"
@@ -265,9 +265,9 @@ export const OutroEditorView: React.FC<OutroEditorViewProps> = ({
           {/* Result Card */}
           {result && (
             <div className="p-5 rounded-2xl bg-white/10 border border-white/20 space-y-4">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <div className="w-9 h-9 rounded-xl bg-white/20 text-white flex items-center justify-center">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="w-9 h-9 rounded-xl bg-white/20 text-white flex items-center justify-center shrink-0">
                     <CheckCircle2 className="w-5 h-5" />
                   </div>
                   <div>
@@ -276,7 +276,7 @@ export const OutroEditorView: React.FC<OutroEditorViewProps> = ({
                   </div>
                 </div>
 
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <a
                     href={result.downloadUrl}
                     download

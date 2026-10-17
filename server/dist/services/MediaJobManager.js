@@ -112,7 +112,7 @@ export class MediaJobManager {
     /**
      * Creates a dedicated directory structure for a new job
      */
-    static async createJobRecord(title, filename, type, format, sourceUrl, sourceFormat) {
+    static async createJobRecord(title, filename, type, format, sourceUrl, sourceFormat, customBitrate) {
         const id = nanoid(10);
         const safeTitle = sanitizeFilename(title);
         const safeExt = format.startsWith('.') ? format : `.${format}`;
@@ -145,6 +145,7 @@ export class MediaJobManager {
             sourcePath,
             outputPath,
             format,
+            customBitrate,
             progress: {
                 status: 'QUEUED',
                 percent: 0,

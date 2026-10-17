@@ -33,6 +33,16 @@ export function parseContentRange(header) {
         total: match[3] === '*' ? undefined : Number(match[3]),
     };
 }
+/**
+ * Parses the total size from an unsatisfied-range response,
+ * i.e. `Content-Range: bytes * /123456` sent with a 416.
+ */
+function parseUnsatisfiedTotal(header) {
+    if (!header)
+        return undefined;
+    const match = /bytes\s+\*\/(\d+)/i.exec(header);
+    return match ? Number(match[1]) : undefined;
+}
 /** Pipes a web body into the file stream, counting bytes as they land. */
 async function writeBody(body, writeStream, onBytes) {
     if (!body)
@@ -79,6 +89,21 @@ export async function streamDownloadToFile(remoteUrl, destination, options) {
                 ...(options.signal ? { signal: options.signal } : {}),
             });
             if (!response.ok && response.status !== 206) {
+                // 416 = the requested window starts at/after the end of the object.
+                // That is exactly what a resumed, already-complete download sends, so
+                // treat "we already have every byte" as finished instead of failing.
+                if (response.status === 416 && received > 0) {
+                    await response.body?.cancel().catch(() => { });
+                    const total = parseUnsatisfiedTotal(response.headers.get('content-range'));
+                    if (total !== undefined && received >= total) {
+                        totalBytes = total;
+                        break;
+                    }
+                    // Stale partial file that no longer matches the remote object:
+                    // drop it and fetch the whole thing again.
+                    await reopenFromScratch();
+                    continue;
+                }
                 // The open-ended window was refused; retry with a bounded one.
                 if (useOpenEnded)
                     continue;

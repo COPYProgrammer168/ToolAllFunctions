@@ -172,12 +172,12 @@ export const AudioEditorView: React.FC<AudioEditorViewProps> = ({
         </div>
       ) : (
         <div className="glass-panel p-6 rounded-2xl border border-white/[0.08] space-y-6">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-white/10 border border-white/20 flex items-center justify-center text-neutral-300">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="w-10 h-10 rounded-xl bg-white/10 border border-white/20 flex items-center justify-center text-neutral-300 shrink-0">
                 <FileAudio className="w-5 h-5" />
               </div>
-              <div>
+              <div className="min-w-0">
                 <h4 className="text-sm font-bold text-white truncate max-w-md">{audioTitle}</h4>
                 <p className="text-xs font-mono text-neutral-400">
                   {formatSec(currentTime)} / {formatSec(duration)}
@@ -187,7 +187,7 @@ export const AudioEditorView: React.FC<AudioEditorViewProps> = ({
 
             <button
               onClick={togglePlay}
-              className="px-4 py-2 bg-gradient-to-r from-neutral-600 to-neutral-500 hover:from-neutral-300 text-white rounded-xl text-xs font-bold transition-all shadow-md shadow-white/20 flex items-center gap-2"
+              className="px-4 py-2 bg-gradient-to-r from-neutral-600 to-neutral-500 hover:from-neutral-300 text-white rounded-xl text-xs font-bold transition-all shadow-md shadow-white/20 flex items-center gap-2 shrink-0"
             >
               {isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
               {isPlaying ? 'Pause' : 'Play Selection'}
@@ -196,7 +196,7 @@ export const AudioEditorView: React.FC<AudioEditorViewProps> = ({
 
           {/* Interactive Waveform View */}
           <div className="p-4 bg-neutral-950/80 rounded-xl border border-white/10 relative overflow-hidden">
-            <div className="h-24 flex items-end gap-1 px-1">
+            <div className="h-24 flex items-end gap-px sm:gap-1 px-1">
               {(waveform.length > 0 ? waveform : Array(80).fill(0.3)).map((val, idx) => {
                 const totalBars = waveform.length || 80;
                 const barTime = (idx / totalBars) * duration;
@@ -386,9 +386,9 @@ export const AudioEditorView: React.FC<AudioEditorViewProps> = ({
 
           {/* Exported Result */}
           {result && (
-            <div className="p-5 rounded-2xl bg-white/10 border border-white/20 flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <div className="w-9 h-9 rounded-xl bg-white/20 text-white flex items-center justify-center">
+            <div className="p-5 rounded-2xl bg-white/10 border border-white/20 flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="w-9 h-9 rounded-xl bg-white/20 text-white flex items-center justify-center shrink-0">
                   <CheckCircle2 className="w-5 h-5" />
                 </div>
                 <div>

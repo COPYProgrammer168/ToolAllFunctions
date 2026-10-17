@@ -128,24 +128,24 @@ export const Navbar: React.FC<NavbarProps> = ({
           {hasActiveVideo && (
             <button
               onClick={onReset}
-              className="text-xs text-neutral-400 hover:text-neutral-200 flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-white/[0.06] hover:bg-white/[0.04] transition-all"
+              className="text-xs text-neutral-400 hover:text-neutral-200 flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-lg border border-white/[0.06] hover:bg-white/[0.04] transition-all shrink-0"
               title="Start with new video"
             >
-              <RefreshCw className="w-3 h-3" />
-              New Video
+              <RefreshCw className="w-3 h-3 shrink-0" />
+              <span className="hidden sm:inline">New Video</span>
             </button>
           )}
 
           {/* Hardware status pill */}
           <button
             onClick={onOpenHardware}
-            className="flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium bg-neutral-900 border border-white/[0.08] hover:border-white/40 transition-all text-neutral-300 shadow-sm"
+            className="flex items-center gap-2 px-2.5 sm:px-3 py-1.5 rounded-full text-xs font-medium bg-neutral-900 border border-white/[0.08] hover:border-white/40 transition-all text-neutral-300 shadow-sm"
           >
-            <span className="relative flex h-2 w-2">
+            <span className="relative flex h-2 w-2 shrink-0">
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-white opacity-75"></span>
               <span className="relative inline-flex rounded-full h-2 w-2 bg-white"></span>
             </span>
-            <span className="font-mono text-[11px] truncate max-w-[130px] sm:max-w-none">
+            <span className="font-mono text-[11px] truncate max-w-[90px] sm:max-w-none">
               {hardware?.hasNvidiaGpu ? (
                 <>NVENC: {hardware.gpuName?.split(' ')[0] || 'GPU'}</>
               ) : (

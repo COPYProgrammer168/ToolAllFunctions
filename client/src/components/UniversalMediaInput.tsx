@@ -897,8 +897,8 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
                     }`}
                   >
                     <div className="space-y-1.5">
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 min-w-0">
                           {fmt.type === 'audio' ? (
                             <Music className="w-4 h-4 text-fuchsia-400" />
                           ) : fmt.type === 'image' ? (
@@ -918,7 +918,7 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
                             {fmt.format}
                           </span>
                         </div>
-                        <span className="text-[11px] font-mono text-white bg-white/5 px-2 py-0.5 rounded">
+                        <span className="text-[11px] font-mono text-white bg-white/5 px-2 py-0.5 rounded max-w-[60%] truncate text-right shrink-0" title={fmt.qualityLabel}>
                           {fmt.qualityLabel}
                         </span>
                       </div>

@@ -170,7 +170,7 @@ export class PinterestProvider {
                 id: 'pin-video-opt',
                 type: 'video',
                 format: 'mp4',
-                qualityLabel: 'Send to Video Optimizer (4K / 60 FPS AI Pipeline)',
+                qualityLabel: '4K / 60 FPS AI Pipeline',
                 directDownloadUrl: vidUrl,
                 notes: 'Loads directly into VideoOptimize workspace for AI enhancement.',
             });

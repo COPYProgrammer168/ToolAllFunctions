@@ -2,6 +2,7 @@ import React from 'react';
 import { SlidersHorizontal, Gauge } from 'lucide-react';
 import type { JobConfig } from '../types';
 import { PresetSelector } from './PresetSelector';
+import { configForPreset } from '../services/presetConfig';
 
 interface OptimizationPanelProps {
   config: JobConfig;
@@ -32,8 +33,34 @@ export const OptimizationPanel: React.FC<OptimizationPanelProps> = ({
       </div>
 
       <div className="p-5 space-y-6 max-h-[calc(100vh-220px)] overflow-y-auto">
-        {/* Preset */}
-        <PresetSelector selected={config.preset} onChange={(v) => set('preset', v)} />
+        {/* Preset — also applies the preset's resolution/FPS defaults */}
+        <PresetSelector
+          selected={config.preset}
+          onChange={(v) => onChange({ ...configForPreset(v) })}
+        />
+
+        {/* Output Resolution */}
+        <div className="space-y-2">
+          <label className="text-xs font-semibold uppercase tracking-wider text-neutral-400">Output Resolution</label>
+          <select
+            value={config.targetResolution || 'original'}
+            onChange={(e) => set('targetResolution', e.target.value)}
+            disabled={isProcessing}
+            className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-neutral-200 focus:outline-none focus:border-white/50 disabled:opacity-50"
+          >
+            <option value="original">Original (no scaling)</option>
+            <option value="720p">720p</option>
+            <option value="1080p">1080p Full HD</option>
+            <option value="1440p">1440p QHD</option>
+            <option value="4k">4K UHD (2160p)</option>
+            <option value="tiktok_1080x1920">1080 × 1920 (9:16)</option>
+          </select>
+          <p className="text-[10px] leading-relaxed text-neutral-500">
+            TikTok, Reels and Shorts only accept uploads up to <span className="text-neutral-300 font-mono">1080×1920</span>, so the social presets
+            always export 1080p at 60 FPS — even from a 4K source. Choose <span className="text-neutral-300 font-mono">4K UHD</span> only for
+            YouTube or archiving.
+          </p>
+        </div>
 
         {/* Mode */}
         <div className="space-y-2">

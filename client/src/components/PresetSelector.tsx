@@ -8,10 +8,9 @@ interface PresetSelectorProps {
 
 const presets = [
   { id: 'tiktok', label: 'TikTok', desc: '1080×1920 • 60 FPS', icon: '📱' },
-  { id: 'tiktok_4k', label: 'TikTok 4K', desc: '2160×3840 • 60 FPS', icon: '📲' },
-  { id: 'youtube_4k', label: 'YouTube 4K', desc: '3840×2160 • Original', icon: '🎬' },
   { id: 'reels', label: 'Instagram Reels', desc: '1080×1920 • 60 FPS', icon: '📸' },
   { id: 'shorts', label: 'YouTube Shorts', desc: '1080×1920 • 60 FPS', icon: '🎥' },
+  { id: 'youtube_4k', label: 'YouTube 4K', desc: '3840×2160 • 60 FPS', icon: '🎬' },
   { id: 'custom', label: 'Custom', desc: 'Full manual control', icon: '⚙️' },
 ];
 

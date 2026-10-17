@@ -194,6 +194,8 @@ import type {
   DetectedOutro,
   WatermarkMethod,
   WatermarkRegion,
+  CaptionGenerationResponse,
+  CaptionEnginesStatus,
 } from '../types';
 
 export async function probeStreamBitrate(sourceUrl: string): Promise<number | null> {
@@ -515,6 +517,41 @@ export async function sendMediaToOptimizer(
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.error || 'Failed to send media to optimizer');
+  }
+
+  return res.json();
+}
+
+/** Which optional caption engines are installed on the server. */
+export async function fetchCaptionEngines(): Promise<CaptionEnginesStatus> {
+  try {
+    const res = await fetch('/api/media/captions/engines');
+    if (!res.ok) throw new Error('unavailable');
+    return await res.json();
+  } catch {
+    // Treat an unreachable probe as "platform captions only".
+    return { platformCaptions: true, ytDlp: false, whisper: false };
+  }
+}
+
+/**
+ * Generate captions/subtitles for a video URL or a local file path.
+ * URL videos use platform caption tracks (with a yt-dlp fallback); local files
+ * are transcribed with the server's optional Whisper install.
+ */
+export async function generateCaptions(params: {
+  url?: string;
+  filePath?: string;
+  language?: string;
+}): Promise<CaptionGenerationResponse> {
+  const res = await fetch('/api/media/captions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  });
+
+  if (!res.ok) {
+    throw mediaRequestError(res, await readErrorBody(res), `Caption generation failed (HTTP ${res.status})`);
   }
 
   return res.json();

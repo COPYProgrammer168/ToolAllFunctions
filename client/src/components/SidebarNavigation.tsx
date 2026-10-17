@@ -12,9 +12,9 @@ import {
   Download,
   Settings,
   Grid,
-  Box,
   Type,
   FileText,
+  Captions,
 } from 'lucide-react';
 import type { AppNavSection } from '../types';
 
@@ -131,22 +131,17 @@ export const SidebarNavigation: React.FC<SidebarNavigationProps> = ({
           accent: 'text-pink-400',
         },
         {
+          id: 'media-captions' as AppNavSection,
+          label: 'Video Captions',
+          icon: Captions,
+          accent: 'text-teal-400',
+        },
+        {
           id: 'media-downloads' as AppNavSection,
           label: 'Download Manager',
           icon: Download,
           accent: 'text-indigo-400',
           badge: activeJobsCount > 0 ? activeJobsCount : undefined,
-        },
-      ],
-    },
-    {
-      group: 'BLENDER STUDIO',
-      items: [
-        {
-          id: 'blender-3d' as AppNavSection,
-          label: 'Blender 3D',
-          icon: Box,
-          accent: 'text-orange-400',
         },
       ],
     },

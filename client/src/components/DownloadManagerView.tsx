@@ -159,7 +159,7 @@ export const DownloadManagerView: React.FC<DownloadManagerViewProps> = ({
               className="glass-panel p-5 rounded-2xl border border-white/[0.08] hover:border-white/20 transition-all space-y-4"
             >
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-3 min-w-0">
                   <div className="w-10 h-10 rounded-xl bg-neutral-900 border border-white/10 flex items-center justify-center text-white shrink-0">
                     {job.type === 'audio' ? (
                       <Music className="w-5 h-5" />
@@ -169,7 +169,7 @@ export const DownloadManagerView: React.FC<DownloadManagerViewProps> = ({
                       <Film className="w-5 h-5" />
                     )}
                   </div>
-                  <div>
+                  <div className="min-w-0">
                     <h4 className="text-sm font-bold text-white truncate max-w-md">{job.filename}</h4>
                     <p className="text-[11px] font-mono text-neutral-400 truncate max-w-sm">
                       {job.sourceUrl || 'Local Processing Job'}
@@ -193,14 +193,14 @@ export const DownloadManagerView: React.FC<DownloadManagerViewProps> = ({
                     style={{ width: `${job.progress.percent}%` }}
                   />
                 </div>
-                <div className="flex items-center justify-between text-[11px] font-mono text-neutral-400">
+                <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-0.5 text-[11px] font-mono text-neutral-400">
                   <span>
                     {formatBytes(job.progress.downloadedBytes)} / {formatBytes(job.progress.totalBytes)}
                   </span>
                   {job.progress.status === 'DOWNLOADING' && (
                     <span className="text-white">{job.progress.speedFormatted || '0 MB/s'}</span>
                   )}
-                  <span>{job.progress.stageName}</span>
+                  <span className="min-w-0 truncate">{job.progress.stageName}</span>
                 </div>
               </div>
 
@@ -258,7 +258,7 @@ export const DownloadManagerView: React.FC<DownloadManagerViewProps> = ({
                         />
                       </div>
                     )}
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       <a
                         href={`/api/media/jobs/${job.id}/download`}
                         download

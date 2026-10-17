@@ -267,7 +267,7 @@ export class VideoAnalyzer {
       details.push('Upscale to 1080×1920 for maximum TikTok sharpness');
     } else if (m.height >= 2160 || m.width >= 3840) {
       targetResolution = 'original';
-      details.push('Keep original 4K resolution (no downscale)');
+      details.push('4K source detected — keep full 4K for YouTube/archive; TikTok, Reels and Shorts cap uploads at 1080×1920');
     } else {
       targetResolution = '1080p';
       details.push('Keep 1080p native resolution (avoid unnecessary scaling)');
@@ -294,7 +294,9 @@ export class VideoAnalyzer {
 
     let summary = '';
     if (isLandscape) {
-      summary = `Source is landscape (${m.width}×${m.height}) at ${m.fps} FPS. Recommended: 9:16 vertical conversion with blurred background padding + 60 FPS interpolation.`;
+      summary = targetResolution === 'original'
+        ? `Source is landscape 4K (${m.width}×${m.height}) at ${m.fps} FPS. Recommended: keep the 16:9 frame at 4K 60 FPS for YouTube — social platforms downscale uploads to 1080×1920.`
+        : `Source is landscape (${m.width}×${m.height}) at ${m.fps} FPS. Recommended: 9:16 vertical conversion with blurred background padding + 60 FPS interpolation.`;
     } else if (m.fps < 50) {
       summary = `Source is ${m.width}×${m.height} at ${m.fps} FPS. Recommended: 60 FPS motion smoothing + edge-aware detail enhancement.`;
     } else {

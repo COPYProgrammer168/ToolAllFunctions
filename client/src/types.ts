@@ -277,6 +277,46 @@ export interface WatermarkRegion {
   height: number;
 }
 
+// ============================================================================
+// CAPTION / SUBTITLE GENERATION TYPES
+// ============================================================================
+
+export interface CaptionCue {
+  /** Start time in seconds. */
+  start: number;
+  /** End time in seconds. */
+  end: number;
+  text: string;
+}
+
+export interface CaptionGenerationResponse {
+  success: boolean;
+  /** Which engine produced the captions. */
+  source: 'youtube' | 'yt-dlp' | 'whisper';
+  /** Human-readable engine detail, e.g. "Whisper local transcription (base model)". */
+  engineDetail: string;
+  language: string;
+  title?: string;
+  durationSec?: number;
+  cueCount: number;
+  cues: CaptionCue[];
+  srt: string;
+  vtt: string;
+  txt: string;
+  downloads: {
+    srt: string;
+    vtt: string;
+    txt: string;
+  };
+  notices: string[];
+}
+
+export interface CaptionEnginesStatus {
+  platformCaptions: boolean;
+  ytDlp: boolean;
+  whisper: boolean;
+}
+
 export type AppNavSection =
   | 'studio-optimize'
   | 'font-studio'
@@ -290,9 +330,9 @@ export type AppNavSection =
   | 'media-images'
   | 'media-videos'
   | 'media-audio-converter'
+  | 'media-captions'
   | 'media-watermark'
   | 'media-outro'
   | 'media-downloads'
-  | 'blender-3d'
   | 'settings';
 

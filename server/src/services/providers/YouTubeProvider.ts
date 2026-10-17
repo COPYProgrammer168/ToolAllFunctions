@@ -29,6 +29,8 @@ interface StreamCandidate {
   height?: number;
   /** Primary codec id, e.g. `avc1.4d401f` (preferred: ffmpeg can copy it). */
   codec?: string;
+  /** Container mime type, e.g. `video/mp4` or `video/webm`. */
+  mime?: string;
   /** Selected bitrate, used to rank candidates. */
   bitrate?: number;
   /** Stream size in bytes when the platform discloses it. */
@@ -43,10 +45,23 @@ interface StreamCandidate {
  */
 const SAFE_PROGRESSIVE_BYTES = 15 * 1024 * 1024;
 
-/** Rank adaptive video candidates: H.264/MP4 first (copy-friendly), then height. */
+/**
+ * Rank adaptive video candidates.
+ *
+ * Resolution comes first — that is the entire point of a quality picker, and
+ * YouTube caps its H.264/MP4 variants at 1080p, so the previous
+ * "H.264 first" ordering pinned every 4K source to its 1080p AVC stream.
+ * Ties are broken by frame rate, then MP4 container / H.264 codec (lossless
+ * `-c:v copy` mux friendliness: avc > vp9 > av1), then raw bitrate.
+ */
 function adaptiveScore(c: StreamCandidate): number {
-  const avc = /avc1|h264/i.test(c.codec || '') ? 1 : 0;
-  return avc * 1e12 + (c.height || 0) * 1e4 + (c.fps || 0);
+  const codec = c.codec || '';
+  const height = c.height || 0;
+  const fps = Math.min(c.fps || 0, 120);
+  const mp4 = /video\/mp4/i.test(c.mime || '') ? 1 : 0;
+  const codecRank = /avc1|h264/i.test(codec) ? 3 : /vp0?9|vp9/i.test(codec) ? 2 : /av01|av1/i.test(codec) ? 1 : 0;
+  const bitrateMbps = Math.min((c.bitrate || 0) / 1e6, 999);
+  return height * 1e12 + fps * 1e9 + mp4 * 1e7 + codecRank * 1e6 + bitrateMbps;
 }
 
 /** Primary codec id from a `video/mp4; codecs="avc1.4d401f"` mime type. */
@@ -238,10 +253,14 @@ export class YouTubeProvider implements IMediaProvider {
                 });
               }
 
-              // Best adaptive video-only stream (used for muxing when no
+              // Best adaptive video-only streams (used for muxing when no
               // muxed stream is available, e.g. most modern YouTube uploads).
+              // WebM (VP9/AV1) variants are included: above 1080p YouTube only
+              // serves WebM, and ffmpeg can copy either codec into the MP4 mux,
+              // so excluding them (as the old mp4-only filter did) capped the
+              // selectable quality at 1080p.
               const adaptiveVideos = (data.streamingData?.adaptiveFormats || [])
-                .filter((f: any) => f.url && /video\/mp4/.test(f.mimeType || ''))
+                .filter((f: any) => f.url && /video\/(mp4|webm)/.test(f.mimeType || ''))
                 .map((f: any) => ({
                   f,
                   score: adaptiveScore({
@@ -250,6 +269,8 @@ export class YouTubeProvider implements IMediaProvider {
                     height: f.height,
                     fps: f.fps,
                     codec: codecFromMime(f.mimeType),
+                    mime: f.mimeType,
+                    bitrate: f.bitrate,
                   }),
                 }))
                 .sort((a: any, b: any) => b.score - a.score)
@@ -262,6 +283,7 @@ export class YouTubeProvider implements IMediaProvider {
                   fps: f.fps,
                   height: f.height,
                   codec: codecFromMime(f.mimeType),
+                  mime: f.mimeType,
                   bitrate: f.bitrate,
                   contentLength: Number(f.contentLength) || 0,
                 });
@@ -718,11 +740,19 @@ export class YouTubeProvider implements IMediaProvider {
         const score = (f: any): number => {
           const mime = `${f?.mime_type || f?.mimetype || ''}`;
           const codec = `${f?.vcodec || ''} ${f?.acodec || ''} ${mime}`;
-          // Prefer H.264/AAC in MP4: ffmpeg can then remux with -c copy,
-          // while VP9/AV1-only (webm) streams would have to be re-encoded.
-          const mp4 = audio ? /m4a|mp4a|audio\/mp4/i.test(mime + codec) : /avc1|h264|video\/mp4/i.test(mime + codec);
-          const quality = audio ? Number(f?.abr || f?.tbr || 0) : Number(f?.height || f?.tbr || 0);
-          return (mp4 ? 1e9 : 0) + quality;
+          if (audio) {
+            // Highest-bitrate stream in a copy-friendly (M4A/AAC) container wins.
+            const mp4 = /m4a|mp4a|audio\/mp4/i.test(mime + codec);
+            return (mp4 ? 1e9 : 0) + Number(f?.abr || f?.tbr || 0);
+          }
+          // Video: resolution first (a 4K VP9/AV1 WebM beats a 1080p AVC MP4 —
+          // ffmpeg can copy either codec into the muxed MP4), then frame rate,
+          // then MP4/H.264 as the tie-break.
+          const height = Number(f?.height || 0);
+          const fps = Math.min(Number(f?.fps || 0), 120);
+          const mp4 = /avc1|h264|video\/mp4/i.test(mime + codec);
+          const codecRank = /avc1|h264/i.test(codec) ? 3 : /vp0?9/i.test(codec) ? 2 : /av01/i.test(codec) ? 1 : 0;
+          return height * 1e12 + fps * 1e9 + (mp4 ? 1e7 : 0) + codecRank * 1e6;
         };
         const sorted = [...list].sort((a: any, b: any) => score(b) - score(a));
         return sorted.find((f: any) => typeof f.url === 'string' && /^https?:/.test(f.url))?.url;
@@ -817,13 +847,16 @@ export class YouTubeProvider implements IMediaProvider {
       const isVideoHls = (f: any): boolean => !!f.vcodec && f.vcodec !== 'none';
       const isAudioHls = (f: any): boolean => f.vcodec === 'none';
       const hlsVideos = hlsFormats
-        .filter((f: any) => isVideoHls(f) && (f.height || 0) <= 1080)
-        // H.264 first (plays everywhere), then height, then fps.
+        // 2160p included: the old 1080p cap removed every 4K HLS variant
+        // before the ranking below ever saw it.
+        .filter((f: any) => isVideoHls(f) && (f.height || 0) <= 2160)
+        // Highest resolution first, then frame rate, then H.264 over
+        // VP9/AV1 for widest player compatibility.
         .sort(
           (a: any, b: any) =>
-            (Number(/avc1|h264/i.test(`${b.vcodec}`)) - Number(/avc1|h264/i.test(`${a.vcodec}`))) * 1e9 +
-            ((b.height || 0) - (a.height || 0)) * 1e4 +
-            ((b.fps || 0) - (a.fps || 0))
+            ((b.height || 0) - (a.height || 0)) * 1e9 +
+            ((b.fps || 0) - (a.fps || 0)) * 1e6 +
+            (Number(/avc1|h264/i.test(`${b.vcodec}`)) - Number(/avc1|h264/i.test(`${a.vcodec}`))) * 1e3
         );
       const hlsAudios = hlsFormats
         .filter(isAudioHls)

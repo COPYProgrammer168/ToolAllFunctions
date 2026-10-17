@@ -31,6 +31,47 @@ export interface PlannedPipeline {
   explanation: string;
 }
 
+/** Vertical 9:16 canvas presets (TikTok/Reels/Shorts family). */
+const VERTICAL_PRESETS = new Set(['tiktok', 'tiktok_4k', 'reels', 'shorts']);
+
+/**
+ * Default output resolution implied by each export preset.
+ *
+ * TikTok/Reels/Shorts only accept up to 1080×1920 uploads, so every social
+ * preset (including the legacy `tiktok_4k` id) exports the platform-ready
+ * 1080×1920 canvas. True 4K output stays available through `youtube_4k` or an
+ * explicit `targetResolution: '4k'`.
+ */
+const PRESET_RESOLUTION: Partial<Record<JobConfig['preset'], JobConfig['targetResolution']>> = {
+  tiktok: 'tiktok_1080x1920',
+  reels: 'tiktok_1080x1920',
+  shorts: 'tiktok_1080x1920',
+  tiktok_4k: 'tiktok_1080x1920',
+  youtube_4k: '4k',
+};
+
+/**
+ * H.264 Annex A levels and their macroblock-per-second budgets. 4K at 60 FPS
+ * needs 1,944,000 MB/s (level 5.2); the old hard-coded 4.2 made libx264 reject
+ * or mislabel every 4K 60 output.
+ */
+const H264_LEVEL_MBPS: Array<{ level: string; maxMbps: number }> = [
+  { level: '4.1', maxMbps: 245_760 },
+  { level: '4.2', maxMbps: 522_240 },
+  { level: '5.0', maxMbps: 589_824 },
+  { level: '5.1', maxMbps: 983_040 },
+  { level: '5.2', maxMbps: 2_073_600 },
+  { level: '6.0', maxMbps: 4_177_920 },
+  { level: '6.1', maxMbps: 8_355_840 },
+  { level: '6.2', maxMbps: 16_711_680 },
+];
+
+/** Smallest H.264 level whose macroblock budget supports this output. */
+function h264LevelFor(width: number, height: number, fps: number): string {
+  const mbPerSec = Math.ceil(width / 16) * Math.ceil(height / 16) * Math.max(1, fps);
+  return H264_LEVEL_MBPS.find((l) => mbPerSec <= l.maxMbps)?.level || '6.2';
+}
+
 export class OptimizationPlanner {
   public static plan(meta: VideoMetadata, userConfig: Partial<JobConfig>, hasGpu: boolean): PlannedPipeline {
     const mode: ProcessingMode = userConfig.mode || 'smart';
@@ -42,7 +83,12 @@ export class OptimizationPlanner {
       mode,
       scenario,
       preset: userConfig.preset || 'tiktok',
-      targetResolution: userConfig.targetResolution || (userConfig.preset === 'tiktok' ? 'tiktok_1080x1920' : 'original'),
+      // An explicit targetResolution always wins; otherwise the export preset
+      // decides (e.g. youtube_4k → 4k, tiktok_4k → 4k, tiktok → 1080×1920).
+      targetResolution:
+        userConfig.targetResolution ||
+        PRESET_RESOLUTION[userConfig.preset || 'tiktok'] ||
+        'original',
       targetFps: userConfig.targetFps || 60,
       aspectRatioStrategy: userConfig.aspectRatioStrategy || (isLandscape ? 'blur_background' : 'preserve'),
       detail: userConfig.detail || 'natural',
@@ -104,28 +150,40 @@ export class OptimizationPlanner {
     let scaleHeight: number | undefined;
     let upscalingMethod: 'none' | 'lanczos' | 'spline' = 'none';
 
-    if (config.preset === 'tiktok' || config.targetResolution === 'tiktok_1080x1920') {
+    const isVerticalPreset = VERTICAL_PRESETS.has(config.preset);
+
+    if (config.targetResolution === '4k') {
+      if (isVerticalPreset) {
+        // TikTok 4K and friends always produce a 9:16 vertical canvas.
+        scaleWidth = 2160;
+        scaleHeight = 3840;
+      } else {
+        scaleWidth = isLandscape ? 3840 : 2160;
+        scaleHeight = isLandscape ? 2160 : 3840;
+      }
+    } else if (config.targetResolution === 'tiktok_1080x1920' || isVerticalPreset) {
       scaleWidth = 1080;
       scaleHeight = 1920;
-      if (meta.width < 1080 && meta.height < 1920) {
-        upscalingMethod = 'lanczos';
-      }
-    } else if (config.targetResolution === '4k') {
-      scaleWidth = isLandscape ? 3840 : 2160;
-      scaleHeight = isLandscape ? 2160 : 3840;
-      if (meta.width < 3840 && meta.height < 2160) {
-        upscalingMethod = 'lanczos';
-        warnings.push('Upscaling to 4K: Output resolution will increase, but original detail cannot be fully recreated.');
-      }
+    } else if (config.targetResolution === '1440p') {
+      scaleWidth = isLandscape ? 2560 : 1440;
+      scaleHeight = isLandscape ? 1440 : 2560;
     } else if (config.targetResolution === '1080p') {
       scaleWidth = isLandscape ? 1920 : 1080;
       scaleHeight = isLandscape ? 1080 : 1920;
-      if (meta.width < 1080 && meta.height < 1080) {
-        upscalingMethod = 'lanczos';
-      }
     } else if (config.targetResolution === '720p') {
       scaleWidth = isLandscape ? 1280 : 720;
       scaleHeight = isLandscape ? 720 : 1280;
+    }
+
+    // A target canvas with more pixels than the source is an upscale; compare
+    // pixel counts so 9:16 canvases and vertical sources are judged correctly.
+    if (scaleWidth && scaleHeight) {
+      if (scaleWidth * scaleHeight > Math.max(1, meta.width * meta.height)) {
+        upscalingMethod = 'lanczos';
+        if (config.targetResolution === '4k') {
+          warnings.push('Upscaling to 4K: Output resolution will increase, but original detail cannot be fully recreated.');
+        }
+      }
     }
 
     // Determine target FPS & Interpolation
@@ -149,7 +207,9 @@ export class OptimizationPlanner {
     }
 
     // Calculate Adaptive Bitrate
-    const outPixels = (scaleWidth || meta.width) * (scaleHeight || meta.height);
+    const outputWidth = scaleWidth || meta.width;
+    const outputHeight = scaleHeight || meta.height;
+    const outPixels = outputWidth * outputHeight;
     let baseBpp = 0.12;
     if (scenario === 'gaming') baseBpp = 0.18;
     if (mode === 'max_quality') baseBpp = 0.16;
@@ -159,8 +219,13 @@ export class OptimizationPlanner {
     // TikTok cap recommendation: ~12,000 - 18,000 kbps for 1080x1920 60fps
     if (scaleWidth === 1080 && scaleHeight === 1920) {
       targetBitrateKbps = Math.min(18000, Math.max(8000, targetBitrateKbps));
+    } else if (scaleWidth === 2160 && scaleHeight === 3840) {
+      // Vertical 4K 60 FPS (TikTok 4K) — same pixel budget as UHD.
+      targetBitrateKbps = Math.min(45000, Math.max(22000, targetBitrateKbps));
     } else if (scaleWidth === 3840 || scaleHeight === 3840) {
       targetBitrateKbps = Math.min(45000, Math.max(22000, targetBitrateKbps));
+    } else if (scaleWidth === 2560 || scaleHeight === 2560) {
+      targetBitrateKbps = Math.min(30000, Math.max(12000, targetBitrateKbps));
     } else {
       targetBitrateKbps = Math.min(25000, Math.max(5000, targetBitrateKbps));
     }
@@ -174,11 +239,13 @@ export class OptimizationPlanner {
       audioBitrateKbps: 256,
       preset: mode === 'fast' ? 'faster' : (mode === 'max_quality' ? 'slow' : 'medium'),
       profile: 'high',
-      level: '4.2',
+      // H.264 level must cover the output macroblock rate: 4K 60 FPS needs 5.2.
+      level: h264LevelFor(outputWidth, outputHeight, targetFps),
       pixFmt: 'yuv420p',
     };
 
     let explanation = `Pipeline optimized for ${mode.replace('_', ' ')} mode in ${scenario} scenario.`;
+    explanation += ` Output canvas: ${outputWidth}x${outputHeight} @ ${targetFps} FPS (H.264 level ${encoding.level}).`;
     if (config.aspectRatioStrategy === 'blur_background' && isLandscape) {
       explanation += ' Applying 9:16 vertical canvas with blurred background fill to preserve entire landscape frame.';
     }

@@ -65,7 +65,7 @@ export const MediaSettingsModal: React.FC<MediaSettingsModalProps> = ({
         </div>
 
         {/* Tabs */}
-        <div className="flex border-b border-white/5 bg-neutral-950/40 px-5 gap-4">
+        <div className="flex border-b border-white/5 bg-neutral-950/40 px-5 gap-4 overflow-x-auto no-scrollbar">
           {[
             { id: 'hardware', label: 'Hardware', icon: Cpu },
             { id: 'performance', label: 'Performance', icon: Sliders },
@@ -77,7 +77,7 @@ export const MediaSettingsModal: React.FC<MediaSettingsModalProps> = ({
               <button
                 key={tab.id}
                 onClick={() => setActiveTab(tab.id as any)}
-                className={`py-3 text-xs font-semibold flex items-center gap-2 border-b-2 transition-all ${
+                className={`py-3 text-xs font-semibold flex items-center gap-2 border-b-2 transition-all shrink-0 whitespace-nowrap ${
                   activeTab === tab.id
                     ? 'border-white text-white'
                     : 'border-transparent text-neutral-400 hover:text-neutral-200'

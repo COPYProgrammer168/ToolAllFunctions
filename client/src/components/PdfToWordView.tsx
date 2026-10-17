@@ -653,7 +653,7 @@ export const PdfToWordView: React.FC = () => {
               </div>
 
               {/* Action buttons */}
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 {jobData.downloadActions?.canDownloadAll && (
                   <button
                     onClick={handleDownloadAllZip}

@@ -98,7 +98,7 @@ export const ProcessingProgress: React.FC<ProcessingProgressProps> = ({ progress
 const Stat: React.FC<{ label: string; value: string; mono?: boolean }> = ({ label, value, mono }) => (
   <div className="bg-white/5 p-3 rounded-xl border border-white/5 text-center">
     <p className="text-[10px] text-neutral-500 uppercase tracking-wider font-semibold">{label}</p>
-    <p className={`text-sm font-semibold text-white mt-1 ${mono ? 'font-mono' : ''}`}>{value}</p>
+    <p className={`text-sm font-semibold text-white mt-1 truncate ${mono ? 'font-mono' : ''}`}>{value}</p>
   </div>
 );
 

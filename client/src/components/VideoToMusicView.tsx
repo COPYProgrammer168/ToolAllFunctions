@@ -206,12 +206,12 @@ export const VideoToMusicView: React.FC<VideoToMusicViewProps> = ({
           </div>
         </div>
       ) : (
-        <div className="glass-panel p-5 rounded-2xl border border-white/10 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-white/10 border border-white/20 flex items-center justify-center text-white">
+        <div className="glass-panel p-5 rounded-2xl border border-white/10 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="w-10 h-10 rounded-xl bg-white/10 border border-white/20 flex items-center justify-center text-white shrink-0">
               <FileAudio className="w-5 h-5" />
             </div>
-            <div>
+            <div className="min-w-0">
               <p className="text-xs font-mono text-white uppercase tracking-wider">Ready for Extraction</p>
               <h4 className="text-sm font-bold text-white truncate max-w-md">{videoTitle || 'Loaded Video Media'}</h4>
             </div>
@@ -221,7 +221,7 @@ export const VideoToMusicView: React.FC<VideoToMusicViewProps> = ({
               setTempPath(null);
               setResult(null);
             }}
-            className="text-xs text-neutral-400 hover:text-white px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 transition-all"
+            className="text-xs text-neutral-400 hover:text-white px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 transition-all shrink-0"
           >
             Change Video
           </button>
@@ -241,7 +241,7 @@ export const VideoToMusicView: React.FC<VideoToMusicViewProps> = ({
             {/* Target Container */}
             <div className="space-y-2">
               <label className="text-xs font-medium text-neutral-400">Export Container Format</label>
-              <div className="grid grid-cols-5 gap-2">
+              <div className="grid grid-cols-3 sm:grid-cols-5 gap-2">
                 {(['mp3', 'm4a', 'aac', 'flac', 'wav'] as const).map((fmt) => (
                   <button
                     key={fmt}
@@ -327,7 +327,7 @@ export const VideoToMusicView: React.FC<VideoToMusicViewProps> = ({
                 </div>
               </div>
 
-              <div className="grid grid-cols-3 gap-3">
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
                 <div>
                   <label className="text-neutral-400 block mb-1">Genre</label>
                   <input
@@ -393,9 +393,9 @@ export const VideoToMusicView: React.FC<VideoToMusicViewProps> = ({
       {/* Result Card */}
       {result && (
         <div className="glass-panel p-6 rounded-2xl border border-white/20 bg-white/[0.02] space-y-5 animate-fadeIn">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2.5">
-              <div className="w-9 h-9 rounded-xl bg-white/20 border border-white/30 flex items-center justify-center text-white">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div className="w-9 h-9 rounded-xl bg-white/20 border border-white/30 flex items-center justify-center text-white shrink-0">
                 <CheckCircle2 className="w-5 h-5" />
               </div>
               <div>
@@ -406,7 +406,7 @@ export const VideoToMusicView: React.FC<VideoToMusicViewProps> = ({
               </div>
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <button
                 onClick={() =>
                   playerStore.addAndPlay({

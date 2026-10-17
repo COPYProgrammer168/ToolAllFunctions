@@ -13,6 +13,7 @@ import {
   ArrowRight,
   ShieldCheck,
   FileText,
+  Captions,
 } from 'lucide-react';
 import type { AppNavSection } from '../types';
 
@@ -126,6 +127,15 @@ export const MediaHubView: React.FC<MediaHubViewProps> = ({ onNavigate }) => {
       icon: Scissors,
       color: 'from-pink-400/20 to-pink-300/10 text-pink-400 border-pink-400/30',
       titleColor: 'text-pink-300',
+    },
+    {
+      id: 'media-captions' as AppNavSection,
+      title: 'Video Captions',
+      badge: 'SRT / VTT / TXT',
+      desc: 'Generate subtitles from a video link or file with captions export ready for social platforms.',
+      icon: Captions,
+      color: 'from-teal-400/20 to-cyan-300/10 text-teal-400 border-teal-400/30',
+      titleColor: 'text-teal-300',
     },
     {
       id: 'media-downloads' as AppNavSection,

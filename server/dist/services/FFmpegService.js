@@ -3,6 +3,8 @@ import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
 import { HardwareDetector } from './HardwareDetector.js';
 const execAsync = promisify(exec);
+/** Vertical 9:16 canvas presets (TikTok/Reels/Shorts family). */
+const VERTICAL_CANVAS_PRESETS = new Set(['tiktok', 'tiktok_4k', 'reels', 'shorts']);
 export class FFmpegService {
     activeProcesses = new Map();
     cancel(jobId) {
@@ -68,7 +70,12 @@ export class FFmpegService {
     }
     async executeFilterPipeline(jobId, inputPath, outputPath, meta, plan, encoder, onProgress) {
         const isLandscape = meta.width > meta.height;
-        const isTiktok = plan.config.preset === 'tiktok' || plan.config.targetResolution === 'tiktok_1080x1920';
+        const isTiktok = VERTICAL_CANVAS_PRESETS.has(plan.config.preset) ||
+            plan.config.targetResolution === 'tiktok_1080x1920';
+        // Canvas size comes from the plan so 1080×1920, 2160×3840 (TikTok 4K) and
+        // any future vertical canvas all work without hard-coded dimensions.
+        const canvasWidth = plan.filters.scaleWidth || 1080;
+        const canvasHeight = plan.filters.scaleHeight || 1920;
         const isPreview = plan.config.isPreview;
         const previewDuration = plan.config.previewDuration || 5;
         const effectiveDuration = isPreview ? Math.min(meta.duration, previewDuration) : meta.duration;
@@ -115,12 +122,13 @@ export class FFmpegService {
             filterParts.push('eq=contrast=1.01:saturation=1.02');
         }
         // 5. Framerate / Motion Interpolation
+        const motionFps = plan.filters.targetFps || 60;
         if (plan.filters.interpolateMode === 'mci') {
             // Real bidirectional motion estimation
-            filterParts.push('minterpolate=fps=60:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1');
+            filterParts.push(`minterpolate=fps=${motionFps}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1`);
         }
         else if (plan.filters.interpolateMode === 'blend') {
-            filterParts.push('minterpolate=fps=60:mi_mode=blend');
+            filterParts.push(`minterpolate=fps=${motionFps}:mi_mode=blend`);
         }
         else if (plan.filters.targetFps && plan.filters.targetFps !== meta.fps) {
             filterParts.push(`fps=${plan.filters.targetFps}`);
@@ -132,28 +140,28 @@ export class FFmpegService {
         if (isTiktok && isLandscape) {
             const baseFilters = filterParts.length > 0 ? filterParts.join(',') + ',' : '';
             if (plan.filters.aspectRatioStrategy === 'blur_background') {
-                // Splits into blurred background (filling 1080x1920) and crisp centered foreground
+                // Splits into blurred background (filling the vertical canvas) and crisp centered foreground
                 filterComplexArg = `[0:v]${baseFilters}split=2[fg_raw][bg_raw];` +
-                    `[bg_raw]scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,crop=1080:1920,boxblur=25:5[bg];` +
-                    `[fg_raw]scale=1080:1920:force_original_aspect_ratio=decrease:flags=lanczos[fg];` +
+                    `[bg_raw]scale=${canvasWidth}:${canvasHeight}:force_original_aspect_ratio=increase:flags=lanczos,crop=${canvasWidth}:${canvasHeight},boxblur=25:5[bg];` +
+                    `[fg_raw]scale=${canvasWidth}:${canvasHeight}:force_original_aspect_ratio=decrease:flags=lanczos[fg];` +
                     `[bg][fg]overlay=(W-w)/2:(H-h)/2[v_out]`;
             }
             else if (plan.filters.aspectRatioStrategy === 'fit') {
-                // Fits video in 1080x1920 with black bars
-                filterParts.push('scale=1080:1920:force_original_aspect_ratio=decrease:flags=lanczos');
-                filterParts.push('pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black');
+                // Fits video in the vertical canvas with black bars
+                filterParts.push(`scale=${canvasWidth}:${canvasHeight}:force_original_aspect_ratio=decrease:flags=lanczos`);
+                filterParts.push(`pad=${canvasWidth}:${canvasHeight}:(ow-iw)/2:(oh-ih)/2:color=black`);
                 simpleVfArg = filterParts.join(',');
             }
             else if (plan.filters.aspectRatioStrategy === 'crop' || plan.filters.aspectRatioStrategy === 'smart_crop') {
-                // Crops center to 1080x1920
-                filterParts.push('scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos');
-                filterParts.push('crop=1080:1920');
+                // Crops center to the vertical canvas
+                filterParts.push(`scale=${canvasWidth}:${canvasHeight}:force_original_aspect_ratio=increase:flags=lanczos`);
+                filterParts.push(`crop=${canvasWidth}:${canvasHeight}`);
                 simpleVfArg = filterParts.join(',');
             }
             else {
-                // Preserve landscape aspect ratio inside 1080x1920 canvas
-                filterParts.push('scale=1080:1920:force_original_aspect_ratio=decrease:flags=lanczos');
-                filterParts.push('pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black');
+                // Preserve landscape aspect ratio inside the vertical canvas
+                filterParts.push(`scale=${canvasWidth}:${canvasHeight}:force_original_aspect_ratio=decrease:flags=lanczos`);
+                filterParts.push(`pad=${canvasWidth}:${canvasHeight}:(ow-iw)/2:(oh-ih)/2:color=black`);
                 simpleVfArg = filterParts.join(',');
             }
         }
@@ -200,10 +208,10 @@ export class FFmpegService {
         }
         // Codec & Encoder options
         if (encoder === 'h264_nvenc') {
-            args.push('-c:v', 'h264_nvenc', '-preset', plan.config.mode === 'fast' ? 'p3' : 'p6', '-tune', 'hq', '-rc', 'vbr', '-cq', String(plan.encoding.crf), '-b:v', `${plan.encoding.videoBitrateKbps}k`, '-maxrate', `${Math.round(plan.encoding.videoBitrateKbps * 1.4)}k`, '-bufsize', `${Math.round(plan.encoding.videoBitrateKbps * 2)}k`, '-profile:v', 'high', '-pix_fmt', 'yuv420p');
+            args.push('-c:v', 'h264_nvenc', '-preset', plan.config.mode === 'fast' ? 'p3' : 'p6', '-tune', 'hq', '-rc', 'vbr', '-cq', String(plan.encoding.crf), '-b:v', `${plan.encoding.videoBitrateKbps}k`, '-maxrate', `${Math.round(plan.encoding.videoBitrateKbps * 1.4)}k`, '-bufsize', `${Math.round(plan.encoding.videoBitrateKbps * 2)}k`, '-profile:v', plan.encoding.profile, '-level', plan.encoding.level, '-pix_fmt', 'yuv420p');
         }
         else {
-            args.push('-c:v', 'libx264', '-preset', plan.encoding.preset, '-crf', String(plan.encoding.crf), '-maxrate', `${Math.round(plan.encoding.videoBitrateKbps * 1.3)}k`, '-bufsize', `${Math.round(plan.encoding.videoBitrateKbps * 2)}k`, '-profile:v', 'high', '-level', '4.2', '-pix_fmt', 'yuv420p');
+            args.push('-c:v', 'libx264', '-preset', plan.encoding.preset, '-crf', String(plan.encoding.crf), '-maxrate', `${Math.round(plan.encoding.videoBitrateKbps * 1.3)}k`, '-bufsize', `${Math.round(plan.encoding.videoBitrateKbps * 2)}k`, '-profile:v', plan.encoding.profile, '-level', plan.encoding.level, '-pix_fmt', 'yuv420p');
         }
         // Audio options
         if (meta.audioCodec) {

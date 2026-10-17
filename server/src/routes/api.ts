@@ -3,7 +3,7 @@ import type { Response } from 'express';
 import multer from 'multer';
 import path from 'node:path';
 import fs from 'node:fs/promises';
-import { createReadStream, createWriteStream } from 'node:fs';
+import { createReadStream } from 'node:fs';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { nanoid } from 'nanoid';
@@ -18,6 +18,7 @@ import { AudioConverter } from '../services/AudioConverter.js';
 import { OutroDetector } from '../services/OutroDetector.js';
 import { WatermarkEditor } from '../services/WatermarkEditor.js';
 import { ImageProcessor, type SupportedImageFormat } from '../services/ImageProcessor.js';
+import { CaptionGenerator, cuesToSrt, cuesToVtt, cuesToTxt } from '../services/CaptionGenerator.js';
 import { sanitizeFilename } from '../utils/security.js';
 import { DEFAULT_RATE_LIMIT_RETRY_AFTER_SEC } from '../utils/errors.js';
 import { rateLimit } from '../utils/rateLimiter.js';
@@ -111,24 +112,26 @@ apiRouter.get('/system/hardware', async (_req, res) => {
   }
 });
 
-// Demo video generator for instant testing
+// Demo video generator for instant testing — 4K 60 FPS source so the full
+// 4K/60 pipeline (plan → encode → validation) can be exercised end-to-end.
 apiRouter.post('/video/demo', async (_req, res) => {
   try {
     await fs.mkdir(UPLOAD_DIR, { recursive: true });
     const demoPath = path.join(UPLOAD_DIR, `demo_${Date.now()}.mp4`);
-    const genCmd = `ffmpeg -y -f lavfi -i testsrc=duration=4:size=1280x720:rate=30 -f lavfi -i sine=frequency=440:duration=4 -c:v libx264 -pix_fmt yuv420p -b:v 3000k -c:a aac -b:a 128k "${demoPath}"`;
+    const genCmd = `ffmpeg -y -f lavfi -i testsrc2=duration=4:size=3840x2160:rate=60 -f lavfi -i sine=frequency=440:duration=4 -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p -profile:v high -level 5.2 -c:a aac -b:a 128k -movflags +faststart "${demoPath}"`;
     const { exec } = await import('node:child_process');
     const { promisify } = await import('node:util');
     const execAsync = promisify(exec);
-    await execAsync(genCmd);
+    await execAsync(genCmd, { timeout: 10 * 60 * 1000 });
 
-    const report = await VideoAnalyzer.analyze(demoPath, 'gameplay_action_720p30.mp4');
+    const originalName = 'gameplay_action_4k60.mp4';
+    const report = await VideoAnalyzer.analyze(demoPath, originalName);
     const stats = await fs.stat(demoPath);
 
     res.json({
       report,
       tempPath: demoPath,
-      originalName: 'gameplay_action_720p30.mp4',
+      originalName,
       sizeBytes: stats.size,
     });
   } catch (err: any) {
@@ -1166,50 +1169,96 @@ apiRouter.post('/media/send-to-optimizer', async (req, res) => {
     }
 
     let localPath = filePath;
-    let isTemp = false;
+    let resolvedName = originalName || '';
 
-    // If a URL was passed (e.g., from TikTok/YouTube/Pinterest send-to-optimizer action),
-    // download it to a temporary local file first so the optimizer pipeline can access it.
+    // A URL (platform page or direct stream) must be resolved to its real
+    // stream and downloaded here. The previous plain `fetch(filePath)` grabbed
+    // the watch *page* (HTML) or a throttled 360p progressive stream, so the
+    // optimizer analyzed garbage or a quality-capped file instead of the 4K source.
     if (/^https?:\/\//i.test(filePath)) {
-      isTemp = true;
-      const ext = detectSourceFormat(filePath) || 'mp4';
-      const tempName = `optimizer_${Date.now()}_${nanoid(6)}.${ext}`;
-      localPath = path.join(UPLOAD_DIR, tempName);
-
-      const response = await fetch(filePath, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        },
-        signal: AbortSignal.timeout(30000),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to download media from URL: HTTP ${response.status}`);
-      }
-
-      if (!response.body) {
-        throw new Error('Empty response body when downloading media.');
-      }
-
       await fs.mkdir(UPLOAD_DIR, { recursive: true });
-      const fileStream = createWriteStream(localPath);
-      const reader = response.body.getReader();
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        fileStream.write(Buffer.from(value));
-      }
-      await new Promise<void>((resolve, reject) => {
-        fileStream.end((err?: Error | null) => {
-          if (err) reject(err);
-          else resolve();
+
+      const resolved = await MediaSourceResolver.resolveAndAnalyze(filePath);
+      const hlsVideo = resolved.availableFormats.find((f) => f.type === 'video' && f.hlsVideoUrl);
+      const hlsAudio = resolved.availableFormats.find((f) => f.type === 'audio' && f.hlsAudioUrl);
+      const adaptiveVideoUrl = resolved.rawVideoUrl;
+      const adaptiveAudioUrl = resolved.rawAudioUrl || resolved.rawMuxedUrl;
+      const directUrl =
+        resolved.rawMuxedUrl ||
+        resolved.rawSourceUrl ||
+        resolved.availableFormats.find((f) => f.type === 'video' && f.directDownloadUrl)?.directDownloadUrl;
+
+      const hasHls = Boolean(hlsVideo?.hlsVideoUrl);
+      const hasAdaptivePair = Boolean(adaptiveVideoUrl && adaptiveAudioUrl);
+      if (!hasHls && !hasAdaptivePair && !directUrl) {
+        return res.status(400).json({
+          error:
+            resolved.authorizedNotice ||
+            'Could not resolve a downloadable video stream for this URL (private, region-locked, age-restricted, or DRM protected). Try re-running the analysis or paste a direct media file link.',
+          technicalDetails: {
+            platform: resolved.platform,
+            downloadAuthorized: resolved.downloadAuthorized,
+          },
         });
-      });
+      }
+
+      const { execFile } = await import('node:child_process');
+      const runFfmpeg = (ffmpegArgs: string[]) =>
+        new Promise<void>((resolve, reject) => {
+          execFile(
+            ffmpegBin(),
+            ffmpegArgs,
+            { timeout: 2 * 60 * 60 * 1000, maxBuffer: 8 * 1024 * 1024 },
+            (err) => (err ? reject(err) : resolve())
+          );
+        });
+
+      const streamTimeoutMs = 60 * 60 * 1000;
+
+      if (hlsVideo?.hlsVideoUrl) {
+        // Segmented HLS: ffmpeg fetches every segment itself, which is the only
+        // way past the CDN's per-URL byte budget for progressive streams.
+        localPath = path.join(UPLOAD_DIR, `optimizer_${Date.now()}_${nanoid(6)}.mp4`);
+        const args = ['-y', '-i', hlsVideo.hlsVideoUrl];
+        const audioUrl = hlsVideo.hlsAudioUrl || hlsAudio?.hlsAudioUrl;
+        if (audioUrl) args.push('-i', audioUrl, '-map', '0:v:0', '-map', '1:a:0');
+        args.push('-c', 'copy', '-movflags', '+faststart', localPath);
+        await runFfmpeg(args);
+      } else if (adaptiveVideoUrl && adaptiveAudioUrl) {
+        // Adaptive pair: ranged HTTP download of both tracks, then a lossless mux.
+        localPath = path.join(UPLOAD_DIR, `optimizer_${Date.now()}_${nanoid(6)}.mp4`);
+        const videoTmp = `${localPath}.video.bin`;
+        const audioTmp = `${localPath}.audio.bin`;
+        await Promise.all([
+          downloadToFile(adaptiveVideoUrl, videoTmp, { timeoutMs: streamTimeoutMs }),
+          downloadToFile(adaptiveAudioUrl, audioTmp, { timeoutMs: streamTimeoutMs }),
+        ]);
+        await runFfmpeg([
+          '-y',
+          '-i', videoTmp,
+          '-i', audioTmp,
+          '-map', '0:v:0',
+          '-map', '1:a:0',
+          '-c:v', 'copy',
+          '-c:a', 'aac',
+          '-movflags', '+faststart',
+          localPath,
+        ]);
+        await fs.unlink(videoTmp).catch(() => {});
+        await fs.unlink(audioTmp).catch(() => {});
+      } else {
+        const ext = detectSourceFormat(directUrl!) || 'mp4';
+        localPath = path.join(UPLOAD_DIR, `optimizer_${Date.now()}_${nanoid(6)}.${ext}`);
+        await downloadToFile(directUrl!, localPath, { timeoutMs: streamTimeoutMs });
+      }
+
+      resolvedName =
+        resolvedName || `${sanitizeFilename(resolved.title || 'media')}.${path.extname(localPath).replace('.', '') || 'mp4'}`;
     }
 
     await fs.access(localPath);
     const stats = await fs.stat(localPath);
-    const baseName = originalName || path.basename(localPath);
+    const baseName = originalName || resolvedName || path.basename(localPath);
 
     // Run VideoAnalyzer to get report and recommendations
     const report = await VideoAnalyzer.analyze(localPath, baseName);
@@ -1222,8 +1271,87 @@ apiRouter.post('/media/send-to-optimizer', async (req, res) => {
       sizeBytes: stats.size,
     });
   } catch (err: any) {
-    console.error('Send to optimizer error:', err);
-    res.status(500).json({ error: err.message });
+    if (err?.code === 'rate_limited' || err?.status === 429) {
+      console.warn(`[media/send-to-optimizer] platform rate-limited (ip ${clientIp(req)}): ${err?.message || err}`);
+    } else {
+      console.error('Send to optimizer error:', err);
+    }
+    respondApiError(res, err, 500);
+  }
+});
+
+// R2. Video Captions / Subtitles (platform caption tracks, yt-dlp subs, local Whisper)
+apiRouter.get('/media/captions/engines', async (_req, res) => {
+  try {
+    const { hasYtDlp } = await import('../utils/ytDlp.js');
+    const [ytDlp, whisper] = await Promise.all([hasYtDlp(), CaptionGenerator.whisperAvailable()]);
+    res.json({
+      platformCaptions: true,
+      ytDlp,
+      whisper,
+    });
+  } catch (err: any) {
+    respondApiError(res, err, 500);
+  }
+});
+
+apiRouter.post('/media/captions', async (req, res) => {
+  try {
+    const { url, filePath, language } = req.body;
+    if (!url && !filePath) {
+      return res.status(400).json({ error: 'Provide a video URL (url) or a local video path (filePath).' });
+    }
+
+    const lang = typeof language === 'string' && language.trim() ? language.trim().toLowerCase() : 'en';
+    const result = url
+      ? await CaptionGenerator.generateFromUrl(String(url), { language: lang })
+      : await CaptionGenerator.generateFromLocalFile(String(filePath), { language: lang });
+
+    // Persist all three subtitle formats so each can be downloaded directly.
+    const captionDir = path.resolve(__dirname, '../../storage/captions');
+    await fs.mkdir(captionDir, { recursive: true });
+    const baseName = `captions_${Date.now()}_${nanoid(6)}`;
+    const srt = cuesToSrt(result.cues);
+    const vtt = cuesToVtt(result.cues);
+    const txt = cuesToTxt(result.cues);
+    const srtPath = path.join(captionDir, `${baseName}.srt`);
+    const vttPath = path.join(captionDir, `${baseName}.vtt`);
+    const txtPath = path.join(captionDir, `${baseName}.txt`);
+    await Promise.all([
+      fs.writeFile(srtPath, srt, 'utf8'),
+      fs.writeFile(vttPath, vtt, 'utf8'),
+      fs.writeFile(txtPath, txt, 'utf8'),
+    ]);
+
+    const fileUrl = (p: string, name: string) =>
+      `/api/media/file?path=${encodeURIComponent(p)}&name=${encodeURIComponent(name)}`;
+
+    res.json({
+      success: true,
+      source: result.source,
+      engineDetail: result.engineDetail,
+      language: result.language,
+      title: result.title,
+      durationSec: result.durationSec,
+      cueCount: result.cues.length,
+      cues: result.cues,
+      srt,
+      vtt,
+      txt,
+      downloads: {
+        srt: fileUrl(srtPath, 'captions.srt'),
+        vtt: fileUrl(vttPath, 'captions.vtt'),
+        txt: fileUrl(txtPath, 'captions.txt'),
+      },
+      notices: result.notices,
+    });
+  } catch (err: any) {
+    if (err?.code === 'rate_limited' || err?.status === 429) {
+      console.warn(`[media/captions] platform rate-limited (ip ${clientIp(req)}): ${err?.message || err}`);
+    } else {
+      console.error('Caption generation error:', err?.message || err);
+    }
+    respondApiError(res, err, 400);
   }
 });
 

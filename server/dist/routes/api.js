@@ -2,7 +2,7 @@ import { Router } from 'express';
 import multer from 'multer';
 import path from 'node:path';
 import fs from 'node:fs/promises';
-import { createReadStream, createWriteStream } from 'node:fs';
+import { createReadStream } from 'node:fs';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { nanoid } from 'nanoid';
@@ -17,6 +17,7 @@ import { AudioConverter } from '../services/AudioConverter.js';
 import { OutroDetector } from '../services/OutroDetector.js';
 import { WatermarkEditor } from '../services/WatermarkEditor.js';
 import { ImageProcessor } from '../services/ImageProcessor.js';
+import { CaptionGenerator, cuesToSrt, cuesToVtt, cuesToTxt } from '../services/CaptionGenerator.js';
 import { sanitizeFilename } from '../utils/security.js';
 import { DEFAULT_RATE_LIMIT_RETRY_AFTER_SEC } from '../utils/errors.js';
 import { rateLimit } from '../utils/rateLimiter.js';
@@ -103,22 +104,24 @@ apiRouter.get('/system/hardware', async (_req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
-// Demo video generator for instant testing
+// Demo video generator for instant testing — 4K 60 FPS source so the full
+// 4K/60 pipeline (plan → encode → validation) can be exercised end-to-end.
 apiRouter.post('/video/demo', async (_req, res) => {
     try {
         await fs.mkdir(UPLOAD_DIR, { recursive: true });
         const demoPath = path.join(UPLOAD_DIR, `demo_${Date.now()}.mp4`);
-        const genCmd = `ffmpeg -y -f lavfi -i testsrc=duration=4:size=1280x720:rate=30 -f lavfi -i sine=frequency=440:duration=4 -c:v libx264 -pix_fmt yuv420p -b:v 3000k -c:a aac -b:a 128k "${demoPath}"`;
+        const genCmd = `ffmpeg -y -f lavfi -i testsrc2=duration=4:size=3840x2160:rate=60 -f lavfi -i sine=frequency=440:duration=4 -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p -profile:v high -level 5.2 -c:a aac -b:a 128k -movflags +faststart "${demoPath}"`;
         const { exec } = await import('node:child_process');
         const { promisify } = await import('node:util');
         const execAsync = promisify(exec);
-        await execAsync(genCmd);
-        const report = await VideoAnalyzer.analyze(demoPath, 'gameplay_action_720p30.mp4');
+        await execAsync(genCmd, { timeout: 10 * 60 * 1000 });
+        const originalName = 'gameplay_action_4k60.mp4';
+        const report = await VideoAnalyzer.analyze(demoPath, originalName);
         const stats = await fs.stat(demoPath);
         res.json({
             report,
             tempPath: demoPath,
-            originalName: 'gameplay_action_720p30.mp4',
+            originalName,
             sizeBytes: stats.size,
         });
     }
@@ -526,7 +529,10 @@ apiRouter.post('/media/download', async (req, res) => {
         // but the output is audio (e.g., mp3). We must keep the correct source extension.
         const isAudioFromVideo = type === 'audio' && ['mp4', 'webm', 'mov', 'mkv', 'avi', 'm4v'].includes(sourceExt);
         const sourceFormat = isAudioFromVideo ? sourceExt : undefined;
-        const job = await MediaJobManager.createJobRecord(title || 'download', title || 'media', type, format, sourceUrl, sourceFormat);
+        const requestedBitrate = customBitrate !== undefined && customBitrate !== null && customBitrate !== '' && Number(customBitrate) > 0
+            ? Number(customBitrate)
+            : undefined;
+        const job = await MediaJobManager.createJobRecord(title || 'download', title || 'media', type, format, sourceUrl, sourceFormat, requestedBitrate);
         // Asynchronously begin streaming download and conversion
         (async () => {
             try {
@@ -603,47 +609,10 @@ apiRouter.post('/media/download', async (req, res) => {
                     status: 'CONVERTING',
                     stageName: 'Processing media...',
                 });
-                if (type === 'image') {
-                    // Image format conversion
-                    if (format === 'original') {
-                        await fs.copyFile(downloadedSource, job.outputPath);
-                    }
-                    else {
-                        await ImageProcessor.convert(downloadedSource, job.outputPath, format);
-                    }
-                }
-                else if (type === 'audio') {
-                    // Audio extraction/conversion — source might be video or audio file
-                    const audioFormat = (format === 'original' ? 'm4a' : format);
-                    await AudioExtractor.extract({
-                        inputPath: downloadedSource,
-                        outputPath: job.outputPath,
-                        format: audioFormat,
-                        // Pass the requested bitrate through untouched: an explicit
-                        // request (e.g. Music mode's 320 kbps) must survive the encoder
-                        // instead of being dropped by a direct stream copy at the source
-                        // bitrate. With no request the extractor still defaults to 320.
-                        targetBitrateKbps: customBitrate ? Number(customBitrate) : undefined,
-                        preferStreamCopy: true,
-                    });
-                }
-                else {
-                    // Video: copy directly (already in target format)
-                    if (muxUrls || downloadedSource === job.outputPath) {
-                        // Already muxed to job.outputPath by ffmpeg above (or the HLS
-                        // branch wrote the final file there directly).
-                    }
-                    else if (format === 'original' || downloadedSource.endsWith(`.${format}`) || format === 'mp4') {
-                        await fs.copyFile(downloadedSource, job.outputPath);
-                    }
-                    else {
-                        // If conversion needed, use ffmpeg to remux
-                        const { exec: execCb } = await import('node:child_process');
-                        const { promisify } = await import('node:util');
-                        const execAsync = promisify(execCb);
-                        await execAsync(`ffmpeg -y -i "${downloadedSource}" -c copy "${job.outputPath}"`);
-                    }
-                }
+                await processJobOutput(job, downloadedSource, {
+                    // The HLS / mux branches above already wrote the final file.
+                    alreadyFinalized: !!muxUrls || downloadedSource === job.outputPath,
+                });
                 const outStats = await fs.stat(job.outputPath);
                 MediaJobManager.emitProgress(job.id, {
                     status: 'COMPLETED',
@@ -670,6 +639,62 @@ apiRouter.post('/media/download', async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
+/**
+ * Turns a downloaded source file into the job's final output.
+ *
+ * Shared by the initial download flow and the pause/resume flow: resuming used
+ * to copy the raw source straight over the output, which handed back the source
+ * bitrate/container (e.g. a 128 kbps MP3 for a job labelled "320 kbps").
+ */
+async function processJobOutput(job, downloadedSource, opts = {}) {
+    const { type, format } = job;
+    if (type === 'image') {
+        if (format === 'original') {
+            await fs.copyFile(downloadedSource, job.outputPath);
+        }
+        else {
+            await ImageProcessor.convert(downloadedSource, job.outputPath, format);
+        }
+        return;
+    }
+    if (type === 'audio') {
+        // Audio extraction/conversion — the source may be a video or an audio file.
+        const audioFormat = (format === 'original' ? 'm4a' : format);
+        // MP3 exports are 320 kbps CBR across the app ("320 kbps (High Export)",
+        // "Download All → Music", …). An explicit request wins; without one the
+        // extractor would stream-copy the source stream — typically 128 kbps — and
+        // quietly deliver a low-bitrate file. Formats that mean "original stream"
+        // (m4a/flac/wav/'original') keep the lossless stream-copy behaviour.
+        const targetBitrateKbps = job.customBitrate && job.customBitrate > 0
+            ? job.customBitrate
+            : audioFormat === 'mp3'
+                ? 320
+                : undefined;
+        await AudioExtractor.extract({
+            inputPath: downloadedSource,
+            outputPath: job.outputPath,
+            format: audioFormat,
+            targetBitrateKbps,
+            preferStreamCopy: true,
+        });
+        return;
+    }
+    // Video (and anything else): put the already-converted bytes in place.
+    if (opts.alreadyFinalized || downloadedSource === job.outputPath) {
+        // Already muxed to job.outputPath by ffmpeg above (or the HLS branch
+        // wrote the final file there directly).
+        return;
+    }
+    if (format === 'original' || downloadedSource.endsWith(`.${format}`) || format === 'mp4') {
+        await fs.copyFile(downloadedSource, job.outputPath);
+        return;
+    }
+    // Different container requested — remux without re-encoding.
+    const { exec: execCb } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const execAsync = promisify(execCb);
+    await execAsync(`ffmpeg -y -i "${downloadedSource}" -c copy "${job.outputPath}"`);
+}
 /**
  * Detect source media format from a URL to use proper file extensions
  */
@@ -744,7 +769,14 @@ apiRouter.post('/media/jobs/:id/resume', async (req, res) => {
     (async () => {
         try {
             await MediaJobManager.startResumableDownload(job.id, job.downloadMeta.remoteUrl);
-            await fs.copyFile(job.sourcePath, job.outputPath);
+            MediaJobManager.emitProgress(job.id, {
+                status: 'CONVERTING',
+                stageName: 'Processing media...',
+            });
+            // Same conversion the initial flow runs — copying the raw source here
+            // would publish a file at the source bitrate (128 kbps music) and in the
+            // source container instead of the requested one.
+            await processJobOutput(job, job.sourcePath);
             const outStats = await fs.stat(job.outputPath);
             MediaJobManager.emitProgress(job.id, {
                 status: 'COMPLETED',
@@ -1031,47 +1063,83 @@ apiRouter.post('/media/send-to-optimizer', async (req, res) => {
             return res.status(400).json({ error: 'filePath is required.' });
         }
         let localPath = filePath;
-        let isTemp = false;
-        // If a URL was passed (e.g., from TikTok/YouTube/Pinterest send-to-optimizer action),
-        // download it to a temporary local file first so the optimizer pipeline can access it.
+        let resolvedName = originalName || '';
+        // A URL (platform page or direct stream) must be resolved to its real
+        // stream and downloaded here. The previous plain `fetch(filePath)` grabbed
+        // the watch *page* (HTML) or a throttled 360p progressive stream, so the
+        // optimizer analyzed garbage or a quality-capped file instead of the 4K source.
         if (/^https?:\/\//i.test(filePath)) {
-            isTemp = true;
-            const ext = detectSourceFormat(filePath) || 'mp4';
-            const tempName = `optimizer_${Date.now()}_${nanoid(6)}.${ext}`;
-            localPath = path.join(UPLOAD_DIR, tempName);
-            const response = await fetch(filePath, {
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                },
-                signal: AbortSignal.timeout(30000),
-            });
-            if (!response.ok) {
-                throw new Error(`Failed to download media from URL: HTTP ${response.status}`);
-            }
-            if (!response.body) {
-                throw new Error('Empty response body when downloading media.');
-            }
             await fs.mkdir(UPLOAD_DIR, { recursive: true });
-            const fileStream = createWriteStream(localPath);
-            const reader = response.body.getReader();
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done)
-                    break;
-                fileStream.write(Buffer.from(value));
-            }
-            await new Promise((resolve, reject) => {
-                fileStream.end((err) => {
-                    if (err)
-                        reject(err);
-                    else
-                        resolve();
+            const resolved = await MediaSourceResolver.resolveAndAnalyze(filePath);
+            const hlsVideo = resolved.availableFormats.find((f) => f.type === 'video' && f.hlsVideoUrl);
+            const hlsAudio = resolved.availableFormats.find((f) => f.type === 'audio' && f.hlsAudioUrl);
+            const adaptiveVideoUrl = resolved.rawVideoUrl;
+            const adaptiveAudioUrl = resolved.rawAudioUrl || resolved.rawMuxedUrl;
+            const directUrl = resolved.rawMuxedUrl ||
+                resolved.rawSourceUrl ||
+                resolved.availableFormats.find((f) => f.type === 'video' && f.directDownloadUrl)?.directDownloadUrl;
+            const hasHls = Boolean(hlsVideo?.hlsVideoUrl);
+            const hasAdaptivePair = Boolean(adaptiveVideoUrl && adaptiveAudioUrl);
+            if (!hasHls && !hasAdaptivePair && !directUrl) {
+                return res.status(400).json({
+                    error: resolved.authorizedNotice ||
+                        'Could not resolve a downloadable video stream for this URL (private, region-locked, age-restricted, or DRM protected). Try re-running the analysis or paste a direct media file link.',
+                    technicalDetails: {
+                        platform: resolved.platform,
+                        downloadAuthorized: resolved.downloadAuthorized,
+                    },
                 });
+            }
+            const { execFile } = await import('node:child_process');
+            const runFfmpeg = (ffmpegArgs) => new Promise((resolve, reject) => {
+                execFile(ffmpegBin(), ffmpegArgs, { timeout: 2 * 60 * 60 * 1000, maxBuffer: 8 * 1024 * 1024 }, (err) => (err ? reject(err) : resolve()));
             });
+            const streamTimeoutMs = 60 * 60 * 1000;
+            if (hlsVideo?.hlsVideoUrl) {
+                // Segmented HLS: ffmpeg fetches every segment itself, which is the only
+                // way past the CDN's per-URL byte budget for progressive streams.
+                localPath = path.join(UPLOAD_DIR, `optimizer_${Date.now()}_${nanoid(6)}.mp4`);
+                const args = ['-y', '-i', hlsVideo.hlsVideoUrl];
+                const audioUrl = hlsVideo.hlsAudioUrl || hlsAudio?.hlsAudioUrl;
+                if (audioUrl)
+                    args.push('-i', audioUrl, '-map', '0:v:0', '-map', '1:a:0');
+                args.push('-c', 'copy', '-movflags', '+faststart', localPath);
+                await runFfmpeg(args);
+            }
+            else if (adaptiveVideoUrl && adaptiveAudioUrl) {
+                // Adaptive pair: ranged HTTP download of both tracks, then a lossless mux.
+                localPath = path.join(UPLOAD_DIR, `optimizer_${Date.now()}_${nanoid(6)}.mp4`);
+                const videoTmp = `${localPath}.video.bin`;
+                const audioTmp = `${localPath}.audio.bin`;
+                await Promise.all([
+                    downloadToFile(adaptiveVideoUrl, videoTmp, { timeoutMs: streamTimeoutMs }),
+                    downloadToFile(adaptiveAudioUrl, audioTmp, { timeoutMs: streamTimeoutMs }),
+                ]);
+                await runFfmpeg([
+                    '-y',
+                    '-i', videoTmp,
+                    '-i', audioTmp,
+                    '-map', '0:v:0',
+                    '-map', '1:a:0',
+                    '-c:v', 'copy',
+                    '-c:a', 'aac',
+                    '-movflags', '+faststart',
+                    localPath,
+                ]);
+                await fs.unlink(videoTmp).catch(() => { });
+                await fs.unlink(audioTmp).catch(() => { });
+            }
+            else {
+                const ext = detectSourceFormat(directUrl) || 'mp4';
+                localPath = path.join(UPLOAD_DIR, `optimizer_${Date.now()}_${nanoid(6)}.${ext}`);
+                await downloadToFile(directUrl, localPath, { timeoutMs: streamTimeoutMs });
+            }
+            resolvedName =
+                resolvedName || `${sanitizeFilename(resolved.title || 'media')}.${path.extname(localPath).replace('.', '') || 'mp4'}`;
         }
         await fs.access(localPath);
         const stats = await fs.stat(localPath);
-        const baseName = originalName || path.basename(localPath);
+        const baseName = originalName || resolvedName || path.basename(localPath);
         // Run VideoAnalyzer to get report and recommendations
         const report = await VideoAnalyzer.analyze(localPath, baseName);
         res.json({
@@ -1083,8 +1151,84 @@ apiRouter.post('/media/send-to-optimizer', async (req, res) => {
         });
     }
     catch (err) {
-        console.error('Send to optimizer error:', err);
-        res.status(500).json({ error: err.message });
+        if (err?.code === 'rate_limited' || err?.status === 429) {
+            console.warn(`[media/send-to-optimizer] platform rate-limited (ip ${clientIp(req)}): ${err?.message || err}`);
+        }
+        else {
+            console.error('Send to optimizer error:', err);
+        }
+        respondApiError(res, err, 500);
+    }
+});
+// R2. Video Captions / Subtitles (platform caption tracks, yt-dlp subs, local Whisper)
+apiRouter.get('/media/captions/engines', async (_req, res) => {
+    try {
+        const { hasYtDlp } = await import('../utils/ytDlp.js');
+        const [ytDlp, whisper] = await Promise.all([hasYtDlp(), CaptionGenerator.whisperAvailable()]);
+        res.json({
+            platformCaptions: true,
+            ytDlp,
+            whisper,
+        });
+    }
+    catch (err) {
+        respondApiError(res, err, 500);
+    }
+});
+apiRouter.post('/media/captions', async (req, res) => {
+    try {
+        const { url, filePath, language } = req.body;
+        if (!url && !filePath) {
+            return res.status(400).json({ error: 'Provide a video URL (url) or a local video path (filePath).' });
+        }
+        const lang = typeof language === 'string' && language.trim() ? language.trim().toLowerCase() : 'en';
+        const result = url
+            ? await CaptionGenerator.generateFromUrl(String(url), { language: lang })
+            : await CaptionGenerator.generateFromLocalFile(String(filePath), { language: lang });
+        // Persist all three subtitle formats so each can be downloaded directly.
+        const captionDir = path.resolve(__dirname, '../../storage/captions');
+        await fs.mkdir(captionDir, { recursive: true });
+        const baseName = `captions_${Date.now()}_${nanoid(6)}`;
+        const srt = cuesToSrt(result.cues);
+        const vtt = cuesToVtt(result.cues);
+        const txt = cuesToTxt(result.cues);
+        const srtPath = path.join(captionDir, `${baseName}.srt`);
+        const vttPath = path.join(captionDir, `${baseName}.vtt`);
+        const txtPath = path.join(captionDir, `${baseName}.txt`);
+        await Promise.all([
+            fs.writeFile(srtPath, srt, 'utf8'),
+            fs.writeFile(vttPath, vtt, 'utf8'),
+            fs.writeFile(txtPath, txt, 'utf8'),
+        ]);
+        const fileUrl = (p, name) => `/api/media/file?path=${encodeURIComponent(p)}&name=${encodeURIComponent(name)}`;
+        res.json({
+            success: true,
+            source: result.source,
+            engineDetail: result.engineDetail,
+            language: result.language,
+            title: result.title,
+            durationSec: result.durationSec,
+            cueCount: result.cues.length,
+            cues: result.cues,
+            srt,
+            vtt,
+            txt,
+            downloads: {
+                srt: fileUrl(srtPath, 'captions.srt'),
+                vtt: fileUrl(vttPath, 'captions.vtt'),
+                txt: fileUrl(txtPath, 'captions.txt'),
+            },
+            notices: result.notices,
+        });
+    }
+    catch (err) {
+        if (err?.code === 'rate_limited' || err?.status === 429) {
+            console.warn(`[media/captions] platform rate-limited (ip ${clientIp(req)}): ${err?.message || err}`);
+        }
+        else {
+            console.error('Caption generation error:', err?.message || err);
+        }
+        respondApiError(res, err, 400);
     }
 });
 // S. Generic Safe File Download
