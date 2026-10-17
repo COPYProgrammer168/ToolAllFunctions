@@ -25,6 +25,7 @@ import { MediaSettingsModal } from './components/MediaSettingsModal';
 import { FontStudioView } from './components/FontStudioView';
 import { PdfToWordView } from './components/PdfToWordView';
 import { CaptionStudioView } from './components/CaptionStudioView';
+import { SeoStudioView } from './components/SeoStudioView';
 
 import {
   analyzeVideoFile,
@@ -765,6 +766,9 @@ function App() {
               onSendToOptimizer={handleSendToOptimizer}
             />
           )}
+
+          {/* VIEW: SEO & GEO STUDIO */}
+          {activeSection === 'seo-studio' && <SeoStudioView />}
 
           {/* VIEW: VIDEO CAPTIONS STUDIO */}
           {activeSection === 'media-captions' && (

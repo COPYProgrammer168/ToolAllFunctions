@@ -1,4 +1,4 @@
-import type { OptimizationReport, JobConfig, JobProgress, HardwareInfo } from '../types';
+import type { OptimizationReport, JobConfig, JobProgress, HardwareInfo, SeoReport } from '../types';
 
 export interface AnalysisResponse {
   report: OptimizationReport;
@@ -552,6 +552,24 @@ export async function generateCaptions(params: {
 
   if (!res.ok) {
     throw mediaRequestError(res, await readErrorBody(res), `Caption generation failed (HTTP ${res.status})`);
+  }
+
+  return res.json();
+}
+
+/**
+ * Analyze a public website URL and derive SEO/GEO keywords, H1 suggestions,
+ * meta descriptions, tags and social captions.
+ */
+export async function analyzeSeoUrl(url: string): Promise<SeoReport> {
+  const res = await fetch('/api/seo/analyze', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url }),
+  });
+
+  if (!res.ok) {
+    throw mediaRequestError(res, await readErrorBody(res), `Website analysis failed (HTTP ${res.status})`);
   }
 
   return res.json();

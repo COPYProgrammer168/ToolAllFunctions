@@ -12,6 +12,7 @@ import {
   Download,
   Settings,
   Grid,
+  Search,
   Type,
   FileText,
   Captions,
@@ -52,6 +53,12 @@ export const SidebarNavigation: React.FC<SidebarNavigationProps> = ({
           label: 'Font Studio',
           icon: Type,
           accent: 'text-cyan-400',
+        },
+        {
+          id: 'seo-studio' as AppNavSection,
+          label: 'SEO & GEO',
+          icon: Search,
+          accent: 'text-sky-400',
         },
         {
           id: 'pdf-to-word' as AppNavSection,

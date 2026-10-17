@@ -18,6 +18,7 @@ import { OutroDetector } from '../services/OutroDetector.js';
 import { WatermarkEditor } from '../services/WatermarkEditor.js';
 import { ImageProcessor } from '../services/ImageProcessor.js';
 import { CaptionGenerator, cuesToSrt, cuesToVtt, cuesToTxt } from '../services/CaptionGenerator.js';
+import { SeoAnalyzer } from '../services/SeoAnalyzer.js';
 import { sanitizeFilename } from '../utils/security.js';
 import { DEFAULT_RATE_LIMIT_RETRY_AFTER_SEC } from '../utils/errors.js';
 import { rateLimit } from '../utils/rateLimiter.js';
@@ -1228,6 +1229,24 @@ apiRouter.post('/media/captions', async (req, res) => {
         else {
             console.error('Caption generation error:', err?.message || err);
         }
+        respondApiError(res, err, 400);
+    }
+});
+// -------------------------------------------------------------------------
+// SEO / GEO website analyzer — keywords, H1, description, tags and captions
+// -------------------------------------------------------------------------
+const seoAnalyzeRateLimit = rateLimit({ windowMs: 60_000, max: 15, label: 'seo-analyze' });
+apiRouter.post('/seo/analyze', seoAnalyzeRateLimit, async (req, res) => {
+    try {
+        const { url } = req.body || {};
+        if (!url || typeof url !== 'string') {
+            return res.status(400).json({ error: 'Provide a website URL (url) to analyze.' });
+        }
+        const report = await SeoAnalyzer.analyze(url);
+        res.json(report);
+    }
+    catch (err) {
+        console.error('SEO analyze error:', err?.message || err);
         respondApiError(res, err, 400);
     }
 });

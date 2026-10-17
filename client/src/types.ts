@@ -317,8 +317,69 @@ export interface CaptionEnginesStatus {
   whisper: boolean;
 }
 
+/* ─── SEO / GEO website analyzer ─── */
+
+export interface SeoKeyword {
+  term: string;
+  count: number;
+  /** 0-100 relative importance (the top keyword = 100). */
+  score: number;
+  inTitle: boolean;
+  inHeadings: boolean;
+}
+
+export interface SeoPageInfo {
+  title: string;
+  metaDescription: string;
+  metaKeywords: string;
+  language: string;
+  h1: string[];
+  h2: string[];
+  h3: string[];
+  wordCount: number;
+  imageCount: number;
+  imagesMissingAlt: number;
+  internalLinks: number;
+  externalLinks: number;
+  hasCanonical: boolean;
+  hasOpenGraph: boolean;
+  hasTwitterCard: boolean;
+  hasStructuredData: boolean;
+  openGraph: {
+    title?: string;
+    description?: string;
+    image?: string;
+    type?: string;
+  };
+}
+
+export interface SeoCaptionDraft {
+  platform: string;
+  label: string;
+  text: string;
+}
+
+export interface SeoReport {
+  url: string;
+  finalUrl: string;
+  siteName: string;
+  fetchedAt: string;
+  page: SeoPageInfo;
+  seoKeywords: SeoKeyword[];
+  geoKeywords: string[];
+  geoQuestions: string[];
+  h1Suggestions: string[];
+  metaDescriptions: string[];
+  hashtags: string[];
+  metaKeywordTags: string[];
+  captions: SeoCaptionDraft[];
+  issues: string[];
+  notices: string[];
+}
+
 export type AppNavSection =
   | 'studio-optimize'
+  | 'seo-studio'
   | 'font-studio'
   | 'pdf-to-word'
   | 'media-hub'
