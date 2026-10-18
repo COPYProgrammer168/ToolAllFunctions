@@ -56,6 +56,24 @@ On import it prepends the resolved directory to `PATH`, so every existing
 Nothing depends on it: YouTube/TikTok extraction is pure HTTP first, Playwright
 second, yt-dlp last.
 
+### Platform IP blocks & `TT_PROXY`
+
+TikTok (SlardarWAF) and YouTube reject or throttle cloud-datacenter IPs. When
+that happens the Download Manager now reports the exact cause instead of a
+generic "may be private" message:
+
+| Symptom | Notice |
+| --- | --- |
+| `Your IP address is blocked from accessing this post` | TikTok is blocking this server's IP for video extraction |
+| 1.4KB "Please wait…" SlardarWAF stub | anti-bot challenge instead of video data |
+| `HTTP 429` | surfaced as `rate_limited` with a `Retry-After` countdown |
+
+Neither can be fixed in code — they need requests from a different IP. Set
+`TT_PROXY=http://host:port` (or the standard `HTTPS_PROXY`/`HTTP_PROXY` env
+vars) in the Render dashboard and all provider fetches **and** yt-dlp
+invocations (both platforms) route through it. `TT_PROXY=none` disables it
+even when standard env vars exist.
+
 ---
 
 ## 4. Playwright browsers

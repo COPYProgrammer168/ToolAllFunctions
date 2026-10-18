@@ -25,6 +25,7 @@ import { DEFAULT_RATE_LIMIT_RETRY_AFTER_SEC } from '../utils/errors.js';
 import { rateLimit } from '../utils/rateLimiter.js';
 import { downloadToFile } from '../utils/httpDownload.js';
 import { buildStreamHeaders, getStreamCredentials } from '../services/StreamCredentials.js';
+import { proxiedFetch, getProxy } from '../utils/proxy.js';
 import { STORAGE_ROOT } from '../utils/paths.js';
 import { ffprobeBin, ffmpegBin } from '../utils/binaries.js';
 import { pdfToWordRouter } from '../modules/pdf-to-word/routes.js';
@@ -332,6 +333,8 @@ apiRouter.post('/media/analyze', mediaAnalyzeRateLimit, async (req, res) => {
 });
 // B2. Streaming proxy for platform CDN URLs that require special headers
 // (notably TikTok) during <video> preview playback. Supports HTTP Range.
+// Rides TT_PROXY when configured: CDN stream URLs are signed against the
+// resolving IP, so they must be replayed from the same address.
 apiRouter.get('/media/stream', async (req, res) => {
     try {
         const target = req.query.url;
@@ -348,7 +351,7 @@ apiRouter.get('/media/stream', async (req, res) => {
             // makes them deliver the full resource as a 206.
             headers['Range'] = 'bytes=0-';
         }
-        const upstream = await fetch(target, { headers });
+        const upstream = await proxiedFetch(target, { headers });
         if (!upstream.ok && upstream.status !== 206) {
             const hadCreds = !!getStreamCredentials(target);
             console.warn(`[media/stream] upstream ${upstream.status} for ${target.slice(0, 140)} (cached credentials: ${hadCreds ? 'yes' : 'no'}, cookie: ${!!headers.Cookie})`);
@@ -553,7 +556,10 @@ apiRouter.post('/media/download', async (req, res) => {
                         stageName: 'Downloading segmented stream (HLS)…',
                     });
                     const { execFile } = await import('node:child_process');
-                    const hlsArgs = ['-y', '-i', hlsVideoUrl];
+                    // `-proxy` routes ffmpeg's manifest/segment fetches through TT_PROXY
+                    // too (it shares the IP with the resolving proxied fetches).
+                    const hlsProxy = getProxy() ? ['-proxy', getProxy().url] : [];
+                    const hlsArgs = ['-y', ...hlsProxy, '-i', hlsVideoUrl];
                     if (hlsAudioUrl) {
                         hlsArgs.push('-i', hlsAudioUrl, '-map', '0:v:0', '-map', '1:a:0');
                     }
@@ -572,8 +578,9 @@ apiRouter.post('/media/download', async (req, res) => {
                     });
                     const hlsAudioTmp = path.join(job.jobDir, 'working', `hls_audio_${job.id}.m4a`);
                     const { execFile } = await import('node:child_process');
+                    const hlsAudioProxy = getProxy() ? ['-proxy', getProxy().url] : [];
                     await new Promise((resolve, reject) => {
-                        execFile(ffmpegBin(), ['-y', '-i', hlsAudioUrl, '-c', 'copy', hlsAudioTmp], { timeout: 30 * 60 * 1000, maxBuffer: 8 * 1024 * 1024 }, (err) => (err ? reject(err) : resolve()));
+                        execFile(ffmpegBin(), ['-y', ...hlsAudioProxy, '-i', hlsAudioUrl, '-c', 'copy', hlsAudioTmp], { timeout: 30 * 60 * 1000, maxBuffer: 8 * 1024 * 1024 }, (err) => (err ? reject(err) : resolve()));
                     });
                     downloadedSource = hlsAudioTmp;
                 }

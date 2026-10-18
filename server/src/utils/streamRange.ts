@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import { finished } from 'node:stream/promises';
 import { Readable } from 'node:stream';
+import { proxiedFetch } from './proxy.js';
 
 /**
  * Bounded-range helpers for downloading CDN media streams.
@@ -125,7 +126,7 @@ export async function streamDownloadToFile(
       const useOpenEnded = !triedOpenEnded;
       triedOpenEnded = true;
 
-      const response = await fetch(remoteUrl, {
+      const response = await proxiedFetch(remoteUrl, {
         headers: {
           ...options.headers,
           Range: useOpenEnded ? `bytes=${received}-` : nextRangeHeader(received),

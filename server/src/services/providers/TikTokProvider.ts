@@ -6,9 +6,21 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { rememberStreamCredentials, getStreamCredentials } from '../StreamCredentials.js';
 import { findYtDlpInvocation, readCookieJarHeader } from '../../utils/ytDlp.js';
+import { hasProxy, ytdlpProxyArgs, proxiedFetch } from '../../utils/proxy.js';
 import { findCookiesFile } from '../../utils/cookies.js';
 import { fetchWithRetry } from '../../utils/httpFetch.js';
 import { RateLimitedError } from '../../utils/errors.js';
+
+/** Classifies TikTok's extraction failure to produce an honest notice. */
+type TtBlockKind = 'ip_blocked' | 'waf' | 'login_required' | 'rate_limited' | null;
+
+function classifyBlockText(text: string): TtBlockKind {
+  if (!text) return null;
+  if (/ip address is blocked|blocked from accessing|not available in (your|this) region/i.test(text)) return 'ip_blocked';
+  if (/login required|log in to|sign in to|verify to access/i.test(text)) return 'login_required';
+  if (/rate.?limit|too many requests/i.test(text)) return 'rate_limited';
+  return null;
+}
 
 export { findYtDlpInvocation };
 
@@ -268,12 +280,16 @@ export class TikTokProvider implements IMediaProvider {
     let duration: number | undefined;
     let width: number | undefined;
     let height: number | undefined;
+    // Why extraction failed, so the UI shows the real cause instead of a
+    // generic "private/region-restricted" message for IP-level blocks.
+    let blockKind: TtBlockKind = null;
+    let sawPage = false;
 
     // Step 1: Resolve short URLs to canonical form
     let resolvedUrl = url;
     if (/vm\.tiktok\.com|vt\.tiktok\.com|tiktok\.com\/t\//i.test(url)) {
       try {
-        const headRes = await fetch(url, {
+        const headRes = await proxiedFetch(url, {
           method: 'HEAD',
           redirect: 'follow',
           headers: {
@@ -290,7 +306,7 @@ export class TikTokProvider implements IMediaProvider {
     // Step 2: oEmbed metadata
     try {
       const oembedUrl = `https://www.tiktok.com/oembed?url=${encodeURIComponent(resolvedUrl)}`;
-      const res = await fetch(oembedUrl, {
+      const res = await proxiedFetch(oembedUrl, {
         headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
         signal: AbortSignal.timeout(5000),
       });
@@ -318,6 +334,14 @@ export class TikTokProvider implements IMediaProvider {
       const httpResult = await this.extractViaHttp(resolvedUrl);
       html = httpResult.html;
       httpCreds = { cookie: httpResult.cookies, ua: httpResult.ua };
+      // The page fetch may land on TikTok's SlardarWAF challenge or an
+      // explicit IP-block page even when it returns 200.
+      if (html && /your ip address is blocked|blocked from accessing/i.test(html)) {
+        blockKind = 'ip_blocked';
+      } else if (httpResult.waf || (html ? this.isWafChallenge(html) : false)) {
+        blockKind = 'waf';
+      }
+      sawPage = html.length > 0 || Boolean(httpResult.waf);
       if (process.env.TT_DEBUG) {
         console.log('[tt-debug] extractViaHttp videoUrl =', httpResult.videoUrl?.slice(0, 100));
       }
@@ -586,6 +610,10 @@ export class TikTokProvider implements IMediaProvider {
         audioOnlyUrl = ytdlp.audioUrl;
         isAuthorized = true;
       }
+      if (!directVideoUrl && !audioOnlyUrl && ytdlp?.errorKind) {
+        // The extractor itself reported what stood in the way.
+        blockKind = (ytdlp.errorKind as TtBlockKind) ?? blockKind;
+      }
     }
 
     const formats: MediaFormatOption[] = [
@@ -637,7 +665,7 @@ export class TikTokProvider implements IMediaProvider {
       downloadAuthorized: isAuthorized,
       authorizedNotice: isAuthorized
         ? undefined
-        : 'Could not extract a direct video URL from TikTok. The video may be private, region-restricted, or the platform structure has changed.',
+        : this.blockNoticeFor(blockKind),
       copyrightNotice:
         'TikTok content belongs to respective creators. Only download content you own or have explicit permission to use.',
       availableFormats: formats,
@@ -680,7 +708,7 @@ export class TikTokProvider implements IMediaProvider {
   private async fetchVideoPageHtml(
     target: string,
     ua: string
-  ): Promise<{ html: string; cookies: string } | null> {
+  ): Promise<{ html: string; cookies: string; waf: boolean } | null> {
     try {
       // 429 is retried with back-off and then surfaces as a RateLimitedError,
       // so a rate-limited IP no longer masquerades as "no stream available".
@@ -702,13 +730,16 @@ export class TikTokProvider implements IMediaProvider {
       );
       if (!res.ok) return null;
       const html = await res.text();
-      if (this.isWafChallenge(html)) return null;
       const rawCookies: string[] = (res.headers as any).getSetCookie?.() ?? [];
       const cookies = rawCookies
         .map((c) => String(c).split(';')[0])
         .filter(Boolean)
         .join('; ');
-      return { html, cookies };
+      // Keep WAF pages visible to the caller (with `waf: true`) instead of
+      // pretending no page was served — the download manager surfaces the
+      // anti-bot challenge as its own failure instead of "no stream found".
+      if (this.isWafChallenge(html)) return { html, cookies, waf: true };
+      return { html, cookies, waf: false };
     } catch (err) {
       // A rate-limited IP must not be silently downgraded to "no video found".
       if (err instanceof RateLimitedError) throw err;
@@ -733,11 +764,17 @@ export class TikTokProvider implements IMediaProvider {
     duration?: number;
     width?: number;
     height?: number;
+    waf?: boolean;
   }> {
     let fallback: { html: string; cookies?: string; ua?: string } | null = null;
+    let onlyWaf = false;
     for (const attempt of this.buildVideoPageAttempts(pageUrl)) {
       const page = await this.fetchVideoPageHtml(attempt.target, attempt.ua);
       if (!page) continue;
+      if (page.waf) {
+        onlyWaf = true;
+        continue;
+      }
       if (!fallback) fallback = { html: page.html, cookies: page.cookies, ua: attempt.ua };
 
       const extracted = this.extractFromHtml(page.html);
@@ -759,7 +796,9 @@ export class TikTokProvider implements IMediaProvider {
     // No playAddr on any attempt — hand back the first usable page so the
     // caller's og:/regex fallbacks can still find a URL, together with the
     // cookies that page set (the CDN needs them to replay the URL).
-    return fallback ? { html: fallback.html, cookies: fallback.cookies, ua: fallback.ua } : { html: '' };
+    if (fallback) return { html: fallback.html, cookies: fallback.cookies, ua: fallback.ua };
+    // every attempt was a WAF challenge (or nothing was served at all)
+    return onlyWaf ? { html: '', waf: true } : { html: '' };
   }
 
   /** Extract a direct stream URL plus metadata from an already-fetched page. */
@@ -962,13 +1001,42 @@ export class TikTokProvider implements IMediaProvider {
    * fetch it, so the jar is replayed together with the URL — without it the
    * CDN answers HTTP 403.
    */
-  private async ytDlpExtractMedia(url: string): Promise<{ videoUrl?: string; audioUrl?: string } | undefined> {
+  /**
+   * Human explanation for why extraction failed, matched to what we saw:
+   * an explicit TikTok IP block, the SlardarWAF anti-bot challenge, a login
+   * wall, or just "no media found". The download manager shows this text
+   * verbatim, so it must be honest and actionable.
+   */
+  private blockNoticeFor(kind: TtBlockKind): string {
+    const proxyHint = hasProxy()
+      ? ''
+      : ' Set TT_PROXY (or HTTPS_PROXY) to a residential/other-IP proxy URL to route extraction through a different address';
+    const cookiesHint = ' A cookies.txt from a logged-in TikTok session (YT_COOKIES_FILE) can also help.';
+    switch (kind) {
+      case 'ip_blocked':
+        return `TikTok is blocking this server's IP address for video extraction ("Your IP address is blocked from accessing this post"). Cloud/datacenter IPs are commonly rejected.${proxyHint}.${cookiesHint}`;
+      case 'waf':
+        return `TikTok's anti-bot challenge (SlardarWAF) served a challenge page instead of video data, so no stream could be extracted.${proxyHint}.${cookiesHint}`;
+      case 'login_required':
+        return `TikTok requires an authenticated session to access this video.${cookiesHint}`;
+      case 'rate_limited':
+        return 'TikTok is rate-limiting this server\'s IP address (too many requests). Wait a minute and retry.';
+      default:
+        return 'Could not extract a direct video URL from TikTok. The video may be private, region-restricted, or the platform structure has changed.';
+    }
+  }
+
+  private async ytDlpExtractMedia(url: string): Promise<{
+    videoUrl?: string;
+    audioUrl?: string;
+    errorKind?: TtBlockKind;
+  } | undefined> {
     const invocation = await findYtDlpInvocation();
     if (!invocation) return undefined;
     const userCookies = findCookiesFile();
     const jar = userCookies || path.join(os.tmpdir(), `tt-ytdlp-${process.pid}-${Date.now()}.cookies.txt`);
     try {
-      const args = [...invocation.prefixArgs, '--no-warnings', '--dump-single-json', '--no-playlist', '--cookies', jar];
+      const args = [...invocation.prefixArgs, ...ytdlpProxyArgs(), '--no-warnings', '--dump-single-json', '--no-playlist', '--cookies', jar];
       args.push(url);
       const { stdout } = await execFileAsync(invocation.command, args, {
         timeout: 90000,
@@ -1009,8 +1077,13 @@ export class TikTokProvider implements IMediaProvider {
       }
       if (v) return { videoUrl: v };
       if (a) return { audioUrl: a };
-    } catch (err) {
+    } catch (err: any) {
+      const failureText = `${err?.stderr || ''}\n${err?.message || ''}`;
+      const blockText = /ip address is blocked|blocked from accessing|not available in (your|this) region|login required|log in to|sign in to|rate.?limit|too many requests/i.test(failureText)
+        ? classifyBlockText(failureText)
+        : null;
       console.error('yt-dlp TikTok extract failed:', (err as Error).message);
+      return { errorKind: blockText ?? undefined };
     } finally {
       if (!userCookies) {
         try {
@@ -1026,7 +1099,7 @@ export class TikTokProvider implements IMediaProvider {
       const invocation = await findYtDlpInvocation();
       if (!invocation) return [];
       const cookies = findCookiesFile();
-      const args = [...invocation.prefixArgs, '--flat-playlist', '--dump-json', '--no-warnings', '--playlist-end', '50'];
+      const args = [...invocation.prefixArgs, ...ytdlpProxyArgs(), '--flat-playlist', '--dump-json', '--no-warnings', '--playlist-end', '50'];
       if (cookies) args.push('--cookies', cookies);
       args.push(url);
       const { stdout } = await execFileAsync(invocation.command, args, {

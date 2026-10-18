@@ -5,6 +5,7 @@ import { promisify } from 'node:util';
 import { rememberStreamCredentials, buildStreamHeaders } from '../StreamCredentials.js';
 import { parseContentRange } from '../../utils/streamRange.js';
 import { YTDLP_UA, findYtDlpInvocation, readCookieJarHeader, tempCookieJar } from '../../utils/ytDlp.js';
+import { ytdlpProxyArgs, proxiedFetch } from '../../utils/proxy.js';
 import { findCookiesFile } from '../../utils/cookies.js';
 import { fetchWithRetry } from '../../utils/httpFetch.js';
 import { RateLimitedError } from '../../utils/errors.js';
@@ -110,7 +111,7 @@ export class YouTubeProvider implements IMediaProvider {
     // Attempt to fetch public metadata via YouTube official oEmbed API
     try {
       const oembedUrl = `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`;
-      const res = await fetch(oembedUrl, {
+      const res = await proxiedFetch(oembedUrl, {
         headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
         signal: AbortSignal.timeout(5000),
       });
@@ -711,6 +712,7 @@ export class YouTubeProvider implements IMediaProvider {
     try {
       const args = [
         ...invocation.prefixArgs,
+        ...ytdlpProxyArgs(),
         '--no-warnings',
         '--dump-single-json',
         '--no-playlist',
@@ -820,6 +822,7 @@ export class YouTubeProvider implements IMediaProvider {
     try {
       const args = [
         ...invocation.prefixArgs,
+        ...ytdlpProxyArgs(),
         '--no-warnings',
         '--dump-single-json',
         '--no-playlist',

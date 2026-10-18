@@ -5,6 +5,10 @@
 #    packages (see server/src/utils/binaries.ts) — no system ffmpeg needed.
 #  * yt-dlp is installed as an OPTIONAL best-effort fallback for extraction;
 #    the pure-HTTP providers do not require it.
+#    TikTok blocks/WAF-challenges datacenter IPs and YouTube rate-limits them.
+#    Set TT_PROXY (http://host:port) in the dashboard to route all provider
+#    fetches and yt-dlp invocations through an external proxy.
+#    (TT_PROXY=none disables it even when standard proxy env vars are set.)
 #  * Playwright browsers are intentionally not downloaded (they need system
 #    libraries a native Node instance cannot install). TikTok extraction uses
 #    its HTTP path first and degrades gracefully without a browser.

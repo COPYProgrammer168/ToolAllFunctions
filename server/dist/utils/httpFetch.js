@@ -1,4 +1,5 @@
 import { RateLimitedError } from './errors.js';
+import { proxiedFetch } from './proxy.js';
 /**
  * `fetch` with bounded retries for transient upstream failures.
  *
@@ -41,7 +42,9 @@ export async function fetchWithRetry(url, init = {}, label = 'request') {
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
         let res;
         try {
-            res = await fetch(url, init);
+            // Proxied fetch when TT_PROXY/HTTPS_PROXY is set — same Response shape
+            // (undici) as the global fetch, so callers need no changes.
+            res = await proxiedFetch(url, init);
         }
         catch (err) {
             if (attempt >= MAX_RETRIES)
