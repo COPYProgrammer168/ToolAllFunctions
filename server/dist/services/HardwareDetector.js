@@ -1,9 +1,61 @@
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
 import os from 'node:os';
+import fs from 'node:fs';
 const execAsync = promisify(exec);
 export class HardwareDetector {
     static cachedInfo = null;
+    static cachedMemoryBudgetMB = null;
+    /**
+     * Real memory budget for THIS instance.
+     *
+     * `os.totalmem()` reports the *host's* RAM inside a container, so a Render
+     * free tier (512MB cgroup limit) lies about having gigabytes. Read the
+     * cgroup limit first (v2 then v1), honour the MEMORY_LIMIT_MB override, and
+     * only fall back to `os.totalmem()` on bare-metal. Caches the result.
+     */
+    static memoryBudgetMB() {
+        if (this.cachedMemoryBudgetMB !== null) {
+            return this.cachedMemoryBudgetMB;
+        }
+        let bytes = 0;
+        const envMB = Number.parseInt(process.env.MEMORY_LIMIT_MB ?? '', 10);
+        if (Number.isFinite(envMB) && envMB > 0) {
+            // The override is expressed in MB already...
+            bytes = envMB * 1024 * 1024;
+        }
+        else {
+            // cgroup v2 (most modern Linux incl. Render/Docker): "max" means unset.
+            bytes = this.readCgroupMemoryBytes(['/sys/fs/cgroup/memory.max']);
+            if (!bytes) {
+                // cgroup v1 layout.
+                bytes = this.readCgroupMemoryBytes([
+                    '/sys/fs/cgroup/memory/memory.limit_in_bytes',
+                ]);
+            }
+            // Sanity check: values near (1<<52)+ are "no limit" sentinels on v1.
+            if (bytes && bytes > (1 << 42)) {
+                bytes = 0;
+            }
+        }
+        if (!bytes) {
+            bytes = os.totalmem();
+        }
+        this.cachedMemoryBudgetMB = Math.max(64, Math.round(bytes / (1024 * 1024)));
+        return this.cachedMemoryBudgetMB;
+    }
+    static readCgroupMemoryBytes(files) {
+        for (const file of files) {
+            try {
+                const raw = fs.readFileSync(file, 'utf8').trim();
+                const bytes = Number.parseInt(raw, 10);
+                if (Number.isFinite(bytes) && bytes > 0)
+                    return bytes;
+            }
+            catch { }
+        }
+        return 0;
+    }
     static async detect() {
         if (this.cachedInfo) {
             return this.cachedInfo;
@@ -66,13 +118,13 @@ export class HardwareDetector {
      * Conservative ffmpeg encoder thread budget for the current host. x264
      * frame buffers scale with thread count, so the default `-threads 0`
      * (every host core) OOM-kills small instances — Render free tier exposes
-     * the host's 16+ cores but only ~512MB RAM. Scale by memory, capped by
-     * the visible core count.
+     * the host's 16+ cores but only ~512MB RAM. Scale by the *cgroup* memory
+     * budget (`memoryBudgetMB()`), capped by the visible core count.
      */
     static threadBudget() {
-        const totalMB = Math.round(os.totalmem() / (1024 * 1024));
+        const totalMB = this.memoryBudgetMB();
         const cores = os.cpus().length;
-        const byMemory = totalMB <= 1024 ? 2 : totalMB <= 2048 ? 4 : 8;
+        const byMemory = totalMB <= 1024 ? 1 : totalMB <= 2048 ? 2 : totalMB <= 4096 ? 4 : 8;
         return Math.max(1, Math.min(byMemory, cores));
     }
 }

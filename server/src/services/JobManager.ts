@@ -30,6 +30,14 @@ export class JobManager {
   private static listeners = new Map<string, Set<Response>>();
   private static ffmpegService = new FFmpegService();
 
+  /**
+   * Serial execution queue for background jobs. Every optimization runs a
+   * full ffmpeg transcode; two in parallel exceed small memory budgets
+   * (Render free tier) and one can never start twice because the previous
+   * POST already returned. Chained promises guarantee a single job at a time.
+   */
+  private static jobQueue: Promise<void> = Promise.resolve();
+
   public static async init() {
     await fs.mkdir(BASE_STORAGE_DIR, { recursive: true });
     await fs.mkdir(path.join(BASE_STORAGE_DIR, 'uploads'), { recursive: true });
@@ -149,14 +157,22 @@ export class JobManager {
     const job = this.jobs.get(jobId);
     if (!job) throw new Error('Job not found');
 
-    // Run async in background
-    (async () => {
-      try {
-        this.updateProgress(jobId, {
-          state: 'PROCESSING',
-          stageName: 'Initializing video processing pipeline',
-          percent: 5,
-        });
+    this.jobQueue = this.jobQueue
+      .then(() => this.runJob(jobId))
+      .catch(() => {}) // runJob handles its own failures; keep the queue alive
+      ;
+  }
+
+  private static async runJob(jobId: string): Promise<void> {
+    const job = this.jobs.get(jobId);
+    if (!job) return;
+
+    try {
+      this.updateProgress(jobId, {
+        state: 'PROCESSING',
+        stageName: 'Initializing video processing pipeline',
+        percent: 5,
+      });
 
         await this.ffmpegService.processVideo(
           jobId,
@@ -194,25 +210,26 @@ export class JobManager {
           validationReport: validation,
           timeRemainingSec: 0,
         });
-      } catch (err: any) {
-        if (err.isCancelled) {
-          this.updateProgress(jobId, {
-            state: 'CANCELLED',
-            stageName: 'Optimization cancelled by user',
-            error: 'Process cancelled',
-          });
-          await this.cleanJobOutput(job);
-        } else {
-          console.error(`Job ${jobId} failed:`, err);
-          this.updateProgress(jobId, {
-            state: 'FAILED',
-            stageName: 'Processing failed',
-            error: 'The selected enhancement pipeline could not process this video. Try Fast Optimize or Preserve Original.',
-            technicalError: err.message,
-          });
-        }
+    } catch (err: any) {
+      if (err.isCancelled) {
+        this.updateProgress(jobId, {
+          state: 'CANCELLED',
+          stageName: 'Optimization cancelled by user',
+          error: 'Process cancelled',
+        });
+        await this.cleanJobOutput(job);
+      } else {
+        console.error(`Job ${jobId} failed:`, err);
+        this.updateProgress(jobId, {
+          state: 'FAILED',
+          stageName: err.isMemory ? 'Processing failed (out of memory)' : 'Processing failed',
+          error: err.isMemory
+            ? err.message
+            : 'The selected enhancement pipeline could not process this video. Try Fast Optimize or Preserve Original.',
+          technicalError: err.message,
+        });
       }
-    })();
+    }
   }
 
   public static async cancelJob(jobId: string): Promise<boolean> {

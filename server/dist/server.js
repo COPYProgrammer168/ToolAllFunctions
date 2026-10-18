@@ -38,6 +38,15 @@ app.use(/^\/(?!api|assets).*/, (req, res) => {
         res.status(500).send('Unable to serve client assets');
     }
 });
+// A stray unhandled rejection must not take down the service. In Node 22 an
+// unhandled promise rejection crashes the process by default, which on hosted
+// instances shows up as mysterious 502s until the next restarter cycle.
+process.on('unhandledRejection', (reason) => {
+    console.error('[unhandledRejection]', reason);
+});
+process.on('uncaughtException', (err) => {
+    console.error('[uncaughtException]', err);
+});
 async function startServer() {
     await JobManager.init();
     await MediaJobManager.init();

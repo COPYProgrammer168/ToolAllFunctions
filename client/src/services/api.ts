@@ -106,6 +106,16 @@ export async function cancelJob(jobId: string): Promise<boolean> {
   return Boolean(data.success);
 }
 
+/** Fetches an optimization job's current progress. Throws on 404 (job lost). */
+export async function getOptimizationJob(jobId: string): Promise<{ id: string; progress: JobProgress }> {
+  const res = await fetch(`/api/jobs/${jobId}`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `Job lookup failed: ${res.status}`);
+  }
+  return res.json();
+}
+
 export function subscribeJobProgress(
   jobId: string,
   onProgress: (progress: JobProgress) => void,

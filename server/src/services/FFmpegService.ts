@@ -279,9 +279,19 @@ export class FFmpegService {
         '-pix_fmt', 'yuv420p'
       );
     } else {
+      // libx264: frame-referencing memory (lookahead, ref frames, thread
+      // buffers) is large at high resolutions. Cap the encoder preset and
+      // lookahead on small memory budgets so encoding survives in a 512MB
+      // container instead of getting OOM-killed mid-job.
+      const memoryBudgetMB = HardwareDetector.memoryBudgetMB();
+      const encoderPreset = memoryBudgetMB <= 1024
+        ? 'veryfast'
+        : memoryBudgetMB <= 2048 && plan.encoding.preset === 'slow'
+          ? 'medium'
+          : plan.encoding.preset;
       args.push(
         '-c:v', 'libx264',
-        '-preset', plan.encoding.preset,
+        '-preset', encoderPreset,
         '-crf', String(plan.encoding.crf),
         '-maxrate', `${Math.round(plan.encoding.videoBitrateKbps * 1.3)}k`,
         '-bufsize', `${Math.round(plan.encoding.videoBitrateKbps * 2)}k`,
@@ -289,6 +299,12 @@ export class FFmpegService {
         '-level', plan.encoding.level,
         '-pix_fmt', 'yuv420p'
       );
+      if (memoryBudgetMB <= 2048) {
+        // Default lookahead scales with the preset (~25-40 frames); each held
+        // frame is a full YUV420 picture. 10 frames keeps quality usable while
+        // dramatically shrinking the frame pool.
+        args.push('-x264-params', 'rc-lookahead=10');
+      }
     }
 
     // Audio options
@@ -388,6 +404,14 @@ export class FFmpegService {
           resolve();
         } else {
           const tailError = stderrBuffer.slice(-800);
+          if (code === 137 || tailError.includes("Can't allocate") || tailError.includes('out of memory')) {
+            const err: any = new Error(
+              'The encoder ran out of memory before finishing. This server has a small RAM budget — try Fast Optimize, a lower target resolution, or the 5-second preview.'
+            );
+            err.isMemory = true;
+            reject(err);
+            return;
+          }
           reject(new Error(`FFmpeg exited with code ${code}. Error: ${tailError}`));
         }
       });

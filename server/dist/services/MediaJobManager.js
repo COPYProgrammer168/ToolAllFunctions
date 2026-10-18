@@ -1,5 +1,4 @@
 import path from 'node:path';
-import os from 'node:os';
 import fs from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { nanoid } from 'nanoid';
@@ -8,6 +7,7 @@ import { STORAGE_ROOT } from '../utils/paths.js';
 import { loadJobs, saveJob, deleteJobRow } from './JobDatabase.js';
 import { buildStreamHeaders } from './StreamCredentials.js';
 import { streamDownloadToFile } from '../utils/streamRange.js';
+import { HardwareDetector } from './HardwareDetector.js';
 const BASE_MEDIA_DIR = path.join(STORAGE_ROOT, 'media-tools');
 export class MediaJobManager {
     static jobs = new Map();
@@ -27,7 +27,9 @@ export class MediaJobManager {
                 this.maxConcurrentTranscodes = envMax;
             }
             else {
-                const totalMB = Math.round(os.totalmem() / (1024 * 1024));
+                // Use the cgroup-aware budget (os.totalmem() lies inside containers —
+                // it reports the host, not the 512MB a Render free instance gets).
+                const totalMB = HardwareDetector.memoryBudgetMB();
                 const byRam = Math.max(1, Math.floor(totalMB / 400));
                 this.maxConcurrentTranscodes = Math.min(6, byRam);
             }

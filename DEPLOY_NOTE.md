@@ -115,7 +115,48 @@ mountPath `/mnt/data`, then set `STORAGE_DIR=/mnt/data`.
 
 ---
 
+## 6b. Memory budget guard (why jobs no longer 502)
+
+The first OOM incident: every default "smart optimize" of a <50fps source ran
+`minterpolate=mi_mode=mci` at the **source** resolution — that filter needs
+~1GB+ of RAM per megapixel at 60fps (~2.5GB for a 1080p canvas), and the Render
+free tier only gives the **whole container 512MB**. The ffmpeg child grew until
+the kernel OOM-killed the container: every SSE stream died ("SSE Error") and
+every API call returned 502 for the next minute while Render restarted. After
+the restart the in-memory job was gone, so the retry OOM'd again — "still
+can't optimize video".
+
+Guards now in place (all driven by `HardwareDetector.memoryBudgetMB()`):
+
+| Guard | Location | Behaviour |
+| --- | --- | --- |
+| Real memory budget | `HardwareDetector.memoryBudgetMB()` | Reads `/sys/fs/cgroup/memory.max` (v2) → `memory/memory.limit_in_bytes` (v1) → `MEMORY_LIMIT_MB` override → `os.totalmem()` fallback. `os.totalmem()` lies inside containers (reports host RAM). |
+| Encoder threads | `HardwareDetector.threadBudget()` | 512MB→1 thread, ≤1024→1, ≤2048→2, ≤4096→4, else 8. Previously `<1024→2`. |
+| Motion interpolation | `OptimizationPlanner.plan()` | MCI allowed only when `budget ≥ 2GB` and `peak ≈ 1200MB per MP at 60fps ≤ 55% budget`. Otherwise downgraded to cheap `blend` with a warning surfaced to the UI. |
+| 4K | `OptimizationPlanner.plan()` | Target resolution capped: ≤2GB → 1080p, ≤4GB → 1440p. |
+| x264 frame pool | `FFmpegService.executeFilterPipeline()` | ≤1GB preset forced `veryfast`; ≤2GB binds `-x264-params rc-lookahead=10` (lookahead frames are full YUV pictures — up to ~300MB at 4K on slow presets). |
+| Optimizer queue | `JobManager.startJob()` | Serial promise chain — one optimization at a time; a second POST queues instead of spawning a parallel ffmpeg. |
+| Global handlers | `server.ts` | `unhandledRejection` / `uncaughtException` logged, process keeps serving (Node 22 default-crashes otherwise). |
+| Demo generator | `POST /api/video/demo` | Demo 4K60 ffmpeg run now shards threads via `threadBudget()`. |
+| explicit | `render.yaml` | `MEMORY_LIMIT_MB=512` set for the free plan (redundant with the cgroup read; deterministic). |
+
+Planner matrix (`npx tsx server/test/planner-memory-test.ts` after edits… run
+from `server/`):
+
+| Budget | 1080p30 → tiktok smart | 4K target |
+| --- | --- | --- |
+| 512MB | blend interpolation | capped to 1080p |
+| 2GB | blend (MCI needs ~2.5GB) | capped to 1080p |
+| 16GB | MCI | preserved |
+
+If a job still OOMs (e.g. an exotic filter combination), ffmpeg exits 137 and
+the job is marked `FAILED` with an out-of-memory message instead of dying
+silently.
+
+---
+
 ## 7. File structure after deploy
+
 
 ```
 [app root]

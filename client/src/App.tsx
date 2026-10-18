@@ -33,6 +33,7 @@ import {
   generateDemoVideo,
   createOptimizationJob,
   subscribeJobProgress,
+  getOptimizationJob,
   cancelJob,
   fetchHardwareInfo,
   sendMediaToOptimizer,
@@ -208,9 +209,40 @@ function App() {
             unsubscribe();
           }
         },
-        (err) => {
+        async (err) => {
           console.error('SSE Error:', err);
           unsubscribe();
+          // The stream only dies when the server restarts (e.g. after a
+          // resource failure) or drops the connection. Poll the job once to
+          // get the real state instead of spinning forever.
+          try {
+            const job = await getOptimizationJob(jobId);
+            if (job) {
+              setJobProgress({
+                state: job.progress.state,
+                percent: job.progress.percent,
+                stageName: job.progress.stageName,
+                currentFrame: job.progress.currentFrame,
+                totalFrames: job.progress.totalFrames,
+                fps: job.progress.fps,
+                speed: job.progress.speed,
+                timeRemainingSec: job.progress.timeRemainingSec,
+                error: job.progress.error,
+                technicalError: job.progress.technicalError,
+                warnings: job.progress.warnings,
+              });
+              if (
+                job.progress.state === 'COMPLETED' ||
+                job.progress.state === 'FAILED' ||
+                job.progress.state === 'CANCELLED'
+              ) {
+                if (job.progress.state === 'COMPLETED') setView('RESULT');
+              }
+            }
+          } catch (fetchErr: any) {
+            // Job record missing = the server restarted and lost the job.
+            console.error('Job status lookup after SSE error failed:', fetchErr);
+          }
         }
       );
     } catch (err: any) {

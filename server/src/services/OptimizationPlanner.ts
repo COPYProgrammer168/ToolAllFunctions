@@ -1,4 +1,5 @@
 import type { VideoMetadata, JobConfig, ProcessingMode, ScenarioType, AspectRatioStrategy } from '../types/index.js';
+import { HardwareDetector } from './HardwareDetector.js';
 
 export interface PlannedPipeline {
   config: JobConfig;
@@ -145,12 +146,36 @@ export class OptimizationPlanner {
       config.deblocking = true;
     }
 
+    // Memory-aware planning: ffmpeg's motion-interpolation filter
+    // (`minterpolate`, mi_mode=mci) allocates ~1GB+ per megapixel at 60fps
+    // (a 1080p output peaks around 2-3GB). Instances with small memory
+    // ceilings — e.g. Render free tier with its 512MB cgroup limit — die with
+    // an OOM kill the moment it engages, which crashes the whole service and
+    // surfaces as 502s for every pending request. Downgrade to the cheap
+    // `blend` interpolation (a few frame buffers, linear streaming) instead.
+    const memoryBudgetMB = HardwareDetector.memoryBudgetMB();
+
     // Determine target dimensions
     let scaleWidth: number | undefined;
     let scaleHeight: number | undefined;
     let upscalingMethod: 'none' | 'lanczos' | 'spline' = 'none';
 
     const isVerticalPreset = VERTICAL_PRESETS.has(config.preset);
+
+    // A tight memory ceiling also can't survive big upscale targets: 4K encodes
+    // hold hundreds of MB of reference/lookahead frames that aren't worth the
+    // risk on small instances. Cap the target resolution when RAM is limited.
+    if (config.targetResolution === '4k' && memoryBudgetMB <= 4096) {
+      config.targetResolution = memoryBudgetMB <= 2048 ? '1080p' : '1440p';
+      warnings.push(
+        `Output capped at ${config.targetResolution.toUpperCase()} (target was 4K): encoding 4K needs more than the ${memoryBudgetMB}MB this server has available.`
+      );
+    } else if (config.targetResolution === '1440p' && memoryBudgetMB <= 2048) {
+      config.targetResolution = '1080p';
+      warnings.push(
+        `Output capped at 1080p (target was 1440p): the ${memoryBudgetMB}MB memory budget is too small for larger canvases.`
+      );
+    }
 
     if (config.targetResolution === '4k') {
       if (isVerticalPreset) {
@@ -186,15 +211,33 @@ export class OptimizationPlanner {
       }
     }
 
-    // Determine target FPS & Interpolation
+    // Peak RSS estimate for full motion-compensated interpolation at this
+    // source resolution and target FPS framebuffer rate. minterpolate runs
+    // before scaling, so the source resolution decides its memory cost.
     let targetFps = meta.fps;
+    const mciPeakMBFor = (fps: number) =>
+      Math.round(((meta.width * meta.height) / 1_000_000) * (fps / 60) * 1200);
+    const mciAllowedFor = (fps: number) =>
+      memoryBudgetMB >= 2048 && mciPeakMBFor(fps) <= memoryBudgetMB * 0.55;
+    const mciPeakMB = mciPeakMBFor(60);
+    const mciAllowed = mciAllowedFor(60);
+
+    // Determine target FPS & Interpolation
     let interpolateMode: 'none' | 'mci' | 'blend' = 'none';
 
     if (config.targetFps === 60 || config.motion === '60fps' || config.motion === 'very_smooth') {
       if (meta.fps < 50) {
         targetFps = 60;
-        interpolateMode = mode === 'fast' ? 'blend' : 'mci';
-        warnings.push(`Frame Interpolation: Synthesizing intermediate frames (${meta.fps} → 60 FPS). Fast erratic motion may show slight blending.`);
+        interpolateMode = mciAllowed ? 'mci' : 'blend';
+        if (mciAllowed) {
+          warnings.push(
+            `Frame Interpolation: Synthesizing intermediate frames (${meta.fps} → 60 FPS). Fast erratic motion may show slight blending.`
+          );
+        } else {
+          warnings.push(
+            `Motion interpolation downgraded to frame blending: full motion-compensated interpolation needs ~${mciPeakMB}MB but this server only has ${memoryBudgetMB}MB available.`
+          );
+        }
       } else {
         targetFps = Math.round(meta.fps);
         interpolateMode = 'none';
@@ -202,7 +245,12 @@ export class OptimizationPlanner {
     } else if (typeof config.targetFps === 'number') {
       targetFps = config.targetFps;
       if (targetFps > meta.fps + 5) {
-        interpolateMode = 'mci';
+        interpolateMode = mciAllowedFor(targetFps) ? 'mci' : 'blend';
+        if (!mciAllowedFor(targetFps)) {
+          warnings.push(
+            `Motion interpolation downgraded to frame blending: this server (~${memoryBudgetMB}MB) cannot run motion-compensated interpolation at ${meta.width}×${meta.height}.`
+          );
+        }
       }
     }
 

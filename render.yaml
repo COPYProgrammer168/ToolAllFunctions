@@ -39,6 +39,11 @@ services:
       # single job in flight. OOM kills restart the service and surface as 502s.
       - key: MAX_CONCURRENT_TRANSCODES
         value: "1"
+      # Hard-set the memory budget the planner/api uses to downgrade heavy
+      # pipelines (motion interpolation, 4K encodes, encoder threads). The
+      # server also reads the cgroup limit at runtime; this makes it explicit.
+      - key: MEMORY_LIMIT_MB
+        value: "512"
     healthCheckPath: /health
     restartPolicy: always
     # Persistent disk (optional, uncomment to enable):

@@ -12,6 +12,13 @@ export class JobManager {
     static jobs = new Map();
     static listeners = new Map();
     static ffmpegService = new FFmpegService();
+    /**
+     * Serial execution queue for background jobs. Every optimization runs a
+     * full ffmpeg transcode; two in parallel exceed small memory budgets
+     * (Render free tier) and one can never start twice because the previous
+     * POST already returned. Chained promises guarantee a single job at a time.
+     */
+    static jobQueue = Promise.resolve();
     static async init() {
         await fs.mkdir(BASE_STORAGE_DIR, { recursive: true });
         await fs.mkdir(path.join(BASE_STORAGE_DIR, 'uploads'), { recursive: true });
@@ -108,56 +115,64 @@ export class JobManager {
         const job = this.jobs.get(jobId);
         if (!job)
             throw new Error('Job not found');
-        // Run async in background
-        (async () => {
-            try {
+        this.jobQueue = this.jobQueue
+            .then(() => this.runJob(jobId))
+            .catch(() => { }) // runJob handles its own failures; keep the queue alive
+        ;
+    }
+    static async runJob(jobId) {
+        const job = this.jobs.get(jobId);
+        if (!job)
+            return;
+        try {
+            this.updateProgress(jobId, {
+                state: 'PROCESSING',
+                stageName: 'Initializing video processing pipeline',
+                percent: 5,
+            });
+            await this.ffmpegService.processVideo(jobId, job.inputPath, job.outputPath, job.meta, job.plan, (prog) => {
+                this.updateProgress(jobId, prog);
+            });
+            // Quality Validation
+            this.updateProgress(jobId, {
+                state: 'VALIDATING',
+                stageName: 'Validating output visual integrity and audio synchronization',
+                percent: 97,
+            });
+            const validation = await QualityValidator.validate(job.outputPath, job.meta, job.config.isPreview);
+            const outStat = await fs.stat(job.outputPath);
+            this.updateProgress(jobId, {
+                state: 'COMPLETED',
+                percent: 100,
+                stageName: 'Optimization successfully completed',
+                outputPath: job.outputPath,
+                outputUrl: `/api/jobs/${jobId}/download`,
+                outputSize: outStat.size,
+                validationReport: validation,
+                timeRemainingSec: 0,
+            });
+        }
+        catch (err) {
+            if (err.isCancelled) {
                 this.updateProgress(jobId, {
-                    state: 'PROCESSING',
-                    stageName: 'Initializing video processing pipeline',
-                    percent: 5,
+                    state: 'CANCELLED',
+                    stageName: 'Optimization cancelled by user',
+                    error: 'Process cancelled',
                 });
-                await this.ffmpegService.processVideo(jobId, job.inputPath, job.outputPath, job.meta, job.plan, (prog) => {
-                    this.updateProgress(jobId, prog);
-                });
-                // Quality Validation
+                await this.cleanJobOutput(job);
+            }
+            else {
+                console.error(`Job ${jobId} failed:`, err);
                 this.updateProgress(jobId, {
-                    state: 'VALIDATING',
-                    stageName: 'Validating output visual integrity and audio synchronization',
-                    percent: 97,
-                });
-                const validation = await QualityValidator.validate(job.outputPath, job.meta, job.config.isPreview);
-                const outStat = await fs.stat(job.outputPath);
-                this.updateProgress(jobId, {
-                    state: 'COMPLETED',
-                    percent: 100,
-                    stageName: 'Optimization successfully completed',
-                    outputPath: job.outputPath,
-                    outputUrl: `/api/jobs/${jobId}/download`,
-                    outputSize: outStat.size,
-                    validationReport: validation,
-                    timeRemainingSec: 0,
+                    state: 'FAILED',
+                    stageName: err.isMemory ? 'Processing failed (out of memory)' : 'Processing failed',
+                    error: err.isMemory
+                        ? err.message
+                        : 'The selected enhancement pipeline could not process this video. Try Fast Optimize or Preserve Original.',
+                    technicalError: err.message,
                 });
             }
-            catch (err) {
-                if (err.isCancelled) {
-                    this.updateProgress(jobId, {
-                        state: 'CANCELLED',
-                        stageName: 'Optimization cancelled by user',
-                        error: 'Process cancelled',
-                    });
-                    await this.cleanJobOutput(job);
-                }
-                else {
-                    console.error(`Job ${jobId} failed:`, err);
-                    this.updateProgress(jobId, {
-                        state: 'FAILED',
-                        stageName: 'Processing failed',
-                        error: 'The selected enhancement pipeline could not process this video. Try Fast Optimize or Preserve Original.',
-                        technicalError: err.message,
-                    });
-                }
-            }
-        })();
+        }
     }
     static async cancelJob(jobId) {
         const job = this.jobs.get(jobId);

@@ -124,7 +124,7 @@ apiRouter.post('/video/demo', async (_req, res) => {
   try {
     await fs.mkdir(UPLOAD_DIR, { recursive: true });
     const demoPath = path.join(UPLOAD_DIR, `demo_${Date.now()}.mp4`);
-    const genCmd = `ffmpeg -y -f lavfi -i testsrc2=duration=4:size=3840x2160:rate=60 -f lavfi -i sine=frequency=440:duration=4 -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p -profile:v high -level 5.2 -c:a aac -b:a 128k -movflags +faststart "${demoPath}"`;
+    const genCmd = `ffmpeg -y -f lavfi -i testsrc2=duration=4:size=3840x2160:rate=60 -f lavfi -i sine=frequency=440:duration=4 -c:v libx264 -threads ${HardwareDetector.threadBudget()} -preset veryfast -crf 20 -pix_fmt yuv420p -profile:v high -level 5.2 -c:a aac -b:a 128k -movflags +faststart "${demoPath}"`;
     const { exec } = await import('node:child_process');
     const { promisify } = await import('node:util');
     const execAsync = promisify(exec);
