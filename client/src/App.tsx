@@ -313,7 +313,8 @@ function App() {
           hasActiveVideo={!!report}
         />
 
-        {/* Horizontal Section Navigation */}
+        {/* Left Vertical Sidebar — permanent rail on desktop (main compensates
+            with lg:pl-64), off-canvas drawer behind the Menu button on mobile */}
         <SidebarNavigation
           activeSection={activeSection}
           onSelectSection={(sec) => {
@@ -330,8 +331,9 @@ function App() {
 
         {/* min-w-0 lets this column shrink below its content's min-content
             width — without it a wide row (e.g. the category tab strip) drags
-            the whole page past the viewport on phones. */}
-        <main className="flex-1 flex flex-col min-w-0 p-4 sm:p-6 lg:p-8 max-w-7xl w-full mx-auto">
+            the whole page past the viewport on phones. lg:pl-64 reserves the
+            fixed sidebar's rail width on large screens. */}
+        <main className="flex-1 flex flex-col min-w-0 p-4 sm:p-6 lg:p-8 lg:pl-64 max-w-7xl w-full mx-auto">
           {/* VIEW: FONT STUDIO / TEXT FORGE */}
           {activeSection === 'font-studio' && <FontStudioView />}
 

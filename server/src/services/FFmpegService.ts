@@ -138,7 +138,10 @@ export class FFmpegService {
       filterParts.push('deblock=filter=weak:block=4');
     }
     if (plan.filters.deband) {
-      filterParts.push('deband=1range=16:blur=true');
+      // The deband filter has a single `range` option (`1thr`–`4thr` are the
+      // only per-plane variants), so `deband=1range=…` made ffmpeg abort every
+      // debanding-enabled run — e.g. Max Quality mode — with "Option not found".
+      filterParts.push('deband=range=16:blur=true');
     }
 
     // 2. Denoise
