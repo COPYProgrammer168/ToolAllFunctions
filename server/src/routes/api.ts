@@ -26,13 +26,14 @@ import { DEFAULT_RATE_LIMIT_RETRY_AFTER_SEC } from '../utils/errors.js';
 import { rateLimit } from '../utils/rateLimiter.js';
 import { downloadToFile } from '../utils/httpDownload.js';
 import { buildStreamHeaders, getStreamCredentials } from '../services/StreamCredentials.js';
+import { STORAGE_ROOT } from '../utils/paths.js';
 import { ffprobeBin, ffmpegBin } from '../utils/binaries.js';
 import { pdfToWordRouter } from '../modules/pdf-to-word/routes.js';
 import { qrFilesRouter } from '../modules/qr-files/routes.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const UPLOAD_DIR = path.resolve(__dirname, '../../storage/uploads');
+const UPLOAD_DIR = path.resolve(STORAGE_ROOT, 'uploads');
 
 const storage = multer.diskStorage({
   destination: async (_req, _file, cb) => {
@@ -412,7 +413,7 @@ apiRouter.get('/media/merge-preview', async (req, res) => {
     const { exec: execCb } = await import('node:child_process');
     const { promisify } = await import('node:util');
     const execAsync = promisify(execCb);
-    const tmpDir = path.resolve(__dirname, '../../storage/tmp');
+    const tmpDir = path.resolve(STORAGE_ROOT, 'tmp');
     await fs.mkdir(tmpDir, { recursive: true });
     const id = `${Date.now()}_${nanoid(6)}`;
     const videoTmp = path.join(tmpDir, `pv_${id}.bin`);
@@ -1313,7 +1314,7 @@ apiRouter.post('/media/captions', async (req, res) => {
       : await CaptionGenerator.generateFromLocalFile(String(filePath), { language: lang });
 
     // Persist all three subtitle formats so each can be downloaded directly.
-    const captionDir = path.resolve(__dirname, '../../storage/captions');
+    const captionDir = path.resolve(STORAGE_ROOT, 'captions');
     await fs.mkdir(captionDir, { recursive: true });
     const baseName = `captions_${Date.now()}_${nanoid(6)}`;
     const srt = cuesToSrt(result.cues);
@@ -1408,7 +1409,7 @@ apiRouter.get('/media/file', async (req, res) => {
 
     // Ensure path is inside allowed storage directory
     const resolved = path.resolve(filePath);
-    const storageDir = path.resolve(__dirname, '../../storage');
+    const storageDir = path.resolve(STORAGE_ROOT);
     if (!resolved.startsWith(storageDir)) {
       return res.status(403).send('Access denied.');
     }

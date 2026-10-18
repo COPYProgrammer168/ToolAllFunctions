@@ -62,4 +62,17 @@ export class HardwareDetector {
         };
         return this.cachedInfo;
     }
+    /**
+     * Conservative ffmpeg encoder thread budget for the current host. x264
+     * frame buffers scale with thread count, so the default `-threads 0`
+     * (every host core) OOM-kills small instances — Render free tier exposes
+     * the host's 16+ cores but only ~512MB RAM. Scale by memory, capped by
+     * the visible core count.
+     */
+    static threadBudget() {
+        const totalMB = Math.round(os.totalmem() / (1024 * 1024));
+        const cores = os.cpus().length;
+        const byMemory = totalMB <= 1024 ? 2 : totalMB <= 2048 ? 4 : 8;
+        return Math.max(1, Math.min(byMemory, cores));
+    }
 }

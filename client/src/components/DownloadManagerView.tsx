@@ -32,13 +32,26 @@ export const DownloadManagerView: React.FC<DownloadManagerViewProps> = ({
   const [isLoading, setIsLoading] = useState(false);
   const [previewJobId, setPreviewJobId] = useState<string | null>(null);
 
+  let pollTimer: ReturnType<typeof setTimeout> | undefined;
+  let pollDelay = 4000;
+
+  const scheduleLoad = (nextDelay: number) => {
+    if (pollTimer) clearTimeout(pollTimer);
+    pollDelay = nextDelay;
+    pollTimer = setTimeout(() => {
+      loadJobs();
+    }, pollDelay);
+  };
+
   const loadJobs = async () => {
     setIsLoading(true);
     try {
       const data = await fetchMediaJobs();
       setJobs(data);
+      scheduleLoad(4000); // healthy — restore normal cadence
     } catch (err) {
       console.error(err);
+      scheduleLoad(Math.min(pollDelay * 2, 60_000)); // back off while down
     } finally {
       setIsLoading(false);
     }
@@ -46,8 +59,9 @@ export const DownloadManagerView: React.FC<DownloadManagerViewProps> = ({
 
   useEffect(() => {
     loadJobs();
-    const interval = setInterval(loadJobs, 4000);
-    return () => clearInterval(interval);
+    return () => {
+      if (pollTimer) clearTimeout(pollTimer);
+    };
   }, []);
 
   const handlePause = async (id: string) => {

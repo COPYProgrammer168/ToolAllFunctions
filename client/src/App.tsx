@@ -100,21 +100,33 @@ function App() {
   useEffect(() => {
     fetchHardwareInfo().then(setHardware).catch(console.error);
 
-    // Periodically update active download count for sidebar badge
-    const checkActiveJobs = () => {
-      fetchMediaJobs()
-        .then((jobs) => {
-          const active = jobs.filter(
-            (j) => j.progress.status === 'DOWNLOADING' || j.progress.status === 'CONVERTING'
-          );
-          setActiveJobsCount(active.length);
-        })
-        .catch(() => {});
+    // Periodically update active download count for sidebar badge.
+    // Backs off exponentially while the backend is unreachable so a
+    // sleeping/crashed instance isn't hammered every 5s.
+    let timer: ReturnType<typeof setTimeout>;
+    let delay = 5000;
+    let cancelled = false;
+
+    const checkActiveJobs = async () => {
+      if (cancelled) return;
+      try {
+        const jobs = await fetchMediaJobs();
+        const active = jobs.filter(
+          (j) => j.progress.status === 'DOWNLOADING' || j.progress.status === 'CONVERTING'
+        );
+        setActiveJobsCount(active.length);
+        delay = 5000; // healthy again — restore normal cadence
+      } catch {
+        delay = Math.min(delay * 2, 60_000); // back off while down
+      }
+      if (!cancelled) timer = setTimeout(checkActiveJobs, delay);
     };
 
     checkActiveJobs();
-    const interval = setInterval(checkActiveJobs, 5000);
-    return () => clearInterval(interval);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
   }, []);
 
   // Handlers for Video Optimizer

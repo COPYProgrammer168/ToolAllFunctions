@@ -1,10 +1,10 @@
 import path from 'node:path';
+import os from 'node:os';
 import fs from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { Response } from 'express';
 import { nanoid } from 'nanoid';
-import { HardwareDetector } from './HardwareDetector.js';
 import { sanitizeFilename } from '../utils/security.js';
 import { STORAGE_ROOT } from '../utils/paths.js';
 import { loadJobs, saveJob, deleteJobRow } from './JobDatabase.js';
@@ -76,10 +76,20 @@ export class MediaJobManager {
   public static async init() {
     await fs.mkdir(BASE_MEDIA_DIR, { recursive: true });
 
-    // Compute dynamic concurrency limit based on detected hardware
+    // Compute dynamic concurrency limit based on detected hardware.
+    // Scale by MEMORY, not host cores: Render free tier exposes the host's
+    // 16+ cores but only ~512MB RAM, and os.cpus() reflects the host —
+    // running 6 parallel transcodes there guarantees an OOM kill + restart
+    // (which shows up as 502s for every in-flight request).
     try {
-      const hw = await HardwareDetector.detect();
-      this.maxConcurrentTranscodes = Math.max(1, Math.min(6, Math.floor(hw.cpuCores / 2)));
+      const envMax = Number.parseInt(process.env.MAX_CONCURRENT_TRANSCODES ?? '', 10);
+      if (Number.isFinite(envMax) && envMax > 0) {
+        this.maxConcurrentTranscodes = envMax;
+      } else {
+        const totalMB = Math.round(os.totalmem() / (1024 * 1024));
+        const byRam = Math.max(1, Math.floor(totalMB / 400));
+        this.maxConcurrentTranscodes = Math.min(6, byRam);
+      }
       console.log(`[MediaJobManager] Initialized with max concurrency: ${this.maxConcurrentTranscodes}`);
     } catch {
       this.maxConcurrentTranscodes = 2;
@@ -129,6 +139,8 @@ export class MediaJobManager {
     const jobListeners = this.listeners.get(jobId)!;
     jobListeners.add(res);
 
+    let heartbeat: ReturnType<typeof setInterval> | undefined;
+
     // Send immediate state
     const job = this.jobs.get(jobId);
     if (job) {
@@ -136,11 +148,23 @@ export class MediaJobManager {
     }
 
     const cleanup = () => {
+      if (heartbeat) clearInterval(heartbeat);
       jobListeners.delete(res);
       if (jobListeners.size === 0) {
         this.listeners.delete(jobId);
       }
     };
+
+    // Idle SSE connections are dropped by proxies after ~30-100s of silence.
+    // Comment frames are ignored by EventSource clients but reset those
+    // idle timeouts, keeping streams open while a long job runs.
+    heartbeat = setInterval(() => {
+      try {
+        res.write(': keepalive\n\n');
+      } catch {
+        cleanup();
+      }
+    }, 25_000);
 
     res.on('close', cleanup);
     return cleanup;

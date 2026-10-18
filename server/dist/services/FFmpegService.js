@@ -189,6 +189,10 @@ export class FFmpegService {
             args.push('-ss', '0', '-t', String(previewDuration));
         }
         args.push('-i', inputPath);
+        // Cap encoder threads: the default `-threads 0` uses every host core,
+        // and x264's per-thread frame buffers OOM small instances (Render free
+        // tier exposes many host cores but only ~512MB RAM).
+        args.push('-threads', String(HardwareDetector.threadBudget()));
         // Apply video filters
         if (filterComplexArg) {
             args.push('-filter_complex', filterComplexArg, '-map', '[v_out]');

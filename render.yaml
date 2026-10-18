@@ -35,6 +35,10 @@ services:
         sync: false
       - key: JOBS_DB_PATH
         sync: false
+      # Free tier has ~512MB RAM: each transcode needs ~200-300MB, so keep a
+      # single job in flight. OOM kills restart the service and surface as 502s.
+      - key: MAX_CONCURRENT_TRANSCODES
+        value: "1"
     healthCheckPath: /health
     restartPolicy: always
     # Persistent disk (optional, uncomment to enable):
