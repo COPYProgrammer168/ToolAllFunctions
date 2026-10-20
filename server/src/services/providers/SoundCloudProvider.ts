@@ -125,35 +125,41 @@ export class SoundCloudProvider implements IMediaProvider {
                 }
               }
 
-              // Also resolve HLS transcoding (modern SoundCloud standard for audio)
-              const hls =
-                transcodings.find(
-                  (t) => t.format?.protocol === 'hls' && t.format?.mime_type?.includes('mpeg')
-                ) ||
-                transcodings.find(
-                  (t) =>
-                    t.format?.protocol === 'hls' &&
-                    (t.format?.mime_type?.includes('mp4') || t.format?.mime_type?.includes('ogg'))
-                ) ||
-                transcodings.find((t) => t.format?.protocol === 'hls');
+              // Also resolve HLS transcoding (modern SoundCloud standard for audio).
+              // Prefer the AAC variants: SoundCloud also exposes an ABR
+              // `audio/mpegurl` master whose metadata endpoint can 404. Try the
+              // remaining candidates as a fallback instead of giving up.
+              const hlsCandidates = transcodings.filter(
+                (t) => t.format?.protocol === 'hls' && t.url
+              );
+              const preferredHls = hlsCandidates.filter((t) =>
+                /audio\/(mp4|aac)/i.test(t.format?.mime_type || '')
+              );
+              const orderedHls = [
+                ...preferredHls,
+                ...hlsCandidates.filter((t) => !preferredHls.includes(t)),
+              ];
 
-              if (!directAudioUrl && hls?.url && clientId) {
-                try {
-                  const hlsMetaUrl = new URL(hls.url);
-                  hlsMetaUrl.searchParams.set('client_id', clientId);
-                  const hlsRes = await fetch(hlsMetaUrl.toString(), {
-                    headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
-                    signal: AbortSignal.timeout(8000),
-                  });
-                  if (hlsRes.ok) {
-                    const hlsJson = (await hlsRes.json()) as any;
-                    if (hlsJson?.url) {
-                      hlsAudioUrl = hlsJson.url;
-                      const mime: string = hls.format?.mime_type || '';
-                      progressiveFormat = mime.includes('mpeg') ? 'mp3' : mime.includes('mp4') ? 'm4a' : 'ogg';
+              if (!directAudioUrl && clientId) {
+                for (const hls of orderedHls) {
+                  try {
+                    const hlsMetaUrl = new URL(hls.url);
+                    hlsMetaUrl.searchParams.set('client_id', clientId);
+                    const hlsRes = await fetch(hlsMetaUrl.toString(), {
+                      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+                      signal: AbortSignal.timeout(8000),
+                    });
+                    if (hlsRes.ok) {
+                      const hlsJson = (await hlsRes.json()) as any;
+                      if (hlsJson?.url) {
+                        hlsAudioUrl = hlsJson.url;
+                        const mime: string = hls.format?.mime_type || '';
+                        progressiveFormat = mime.includes('mpeg') ? 'mp3' : mime.includes('mp4') ? 'm4a' : 'ogg';
+                        break;
+                      }
                     }
-                  }
-                } catch {}
+                  } catch {}
+                }
               }
             }
           } catch {
