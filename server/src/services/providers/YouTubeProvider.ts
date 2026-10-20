@@ -842,9 +842,28 @@ export class YouTubeProvider implements IMediaProvider {
         f?.protocol === 'm3u8' ||
         f?.protocol === 'm3u8_native' ||
         /hls_playlist|manifest\.googlevideo/i.test(`${f?.url || ''}`);
-      if (!isHls) return {};
 
-      const hlsFormats = (json?.formats || []).filter((f: any) => f?.url && isHls(f));
+      const formats = json?.formats || [];
+      const hlsFormats = formats.filter((f: any) => f?.url && isHls(f));
+
+      if (hlsFormats.length === 0) {
+        const audioOnly = formats
+          .filter((f: any) => f?.url && f.vcodec === 'none' && f.acodec !== 'none')
+          .sort((a: any, b: any) => (b.tbr || b.abr || 0) - (a.tbr || a.abr || 0));
+        const videoMuxed = formats
+          .filter((f: any) => f?.url && f.vcodec !== 'none' && f.acodec !== 'none')
+          .sort((a: any, b: any) => (b.height || 0) - (a.height || 0));
+        const bestAud = audioOnly[0];
+        const bestMux = videoMuxed[0];
+        if (bestAud || bestMux) {
+          return {
+            videoUrl: bestMux?.url,
+            audioUrl: bestAud?.url || bestMux?.url,
+            resolution: bestMux?.height ? `${bestMux.height}p` : undefined,
+          };
+        }
+        return {};
+      }
       // HLS audio variants report `vcodec: 'none'` with `acodec` often absent
       // entirely (None), so the check must treat a missing codec as audio.
       const isVideoHls = (f: any): boolean => !!f.vcodec && f.vcodec !== 'none';

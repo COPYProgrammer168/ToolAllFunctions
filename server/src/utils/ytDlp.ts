@@ -141,3 +141,143 @@ export function tempCookieJar(): string {
  */
 export const YTDLP_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+
+export interface YtDlpDownloadOptions {
+  url: string;
+  outputPath: string;
+  type: 'video' | 'audio' | 'image';
+  format?: string;
+  customBitrate?: number;
+  onProgress?: (progress: { percent?: number; downloadedBytes?: number; totalBytes?: number; stageName?: string }) => void;
+}
+
+/**
+ * Downloads and converts media directly using yt-dlp.
+ * Excellent fallback when platform API scraping or direct token extraction fails.
+ */
+export async function downloadWithYtDlp(opts: YtDlpDownloadOptions): Promise<string> {
+  const invocation = await findYtDlpInvocation();
+  if (!invocation) {
+    throw new Error('yt-dlp is not available on this server');
+  }
+
+  const { spawn } = await import('node:child_process');
+  const { findCookiesFile } = await import('./cookies.js');
+  const { ytdlpProxyArgs } = await import('./proxy.js');
+  const { ffmpegBin } = await import('./binaries.js');
+
+  const outDir = path.dirname(opts.outputPath);
+  await fs.promises.mkdir(outDir, { recursive: true });
+  const baseName = path.basename(opts.outputPath, path.extname(opts.outputPath));
+  const tempTemplate = path.join(outDir, `${baseName}.%(ext)s`);
+
+  const cookies = findCookiesFile();
+  const args: string[] = [
+    ...invocation.prefixArgs,
+    ...ytdlpProxyArgs(),
+    '--no-warnings',
+    '--newline',
+    '--no-playlist',
+    '--user-agent',
+    YTDLP_UA,
+  ];
+
+  if (cookies) {
+    args.push('--cookies', cookies);
+  }
+
+  const ffmpegPath = ffmpegBin();
+  if (ffmpegPath && ffmpegPath !== 'ffmpeg') {
+    args.push('--ffmpeg-location', path.dirname(ffmpegPath));
+  }
+
+  if (opts.type === 'audio') {
+    args.push('-x');
+    const targetFormat = opts.format && opts.format !== 'original' ? opts.format : 'mp3';
+    args.push('--audio-format', targetFormat);
+    const bitrate = opts.customBitrate && opts.customBitrate > 0 ? opts.customBitrate : 320;
+    args.push('--audio-quality', `${bitrate}k`);
+  } else if (opts.type === 'video') {
+    const targetFormat = opts.format && opts.format !== 'original' ? opts.format : 'mp4';
+    args.push('-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best');
+    args.push('--merge-output-format', targetFormat);
+  }
+
+  args.push('-o', tempTemplate, opts.url);
+
+  return new Promise<string>((resolve, reject) => {
+    const child = spawn(invocation.command, args, {
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    let stderr = '';
+    let lastPercent = 0;
+
+    child.stdout.on('data', (chunk) => {
+      const text = chunk.toString();
+      const lines = text.split(/\r?\n/);
+      for (const line of lines) {
+        const percentMatch = line.match(/\[download\]\s+([\d.]+)%/);
+        if (percentMatch) {
+          const percent = parseFloat(percentMatch[1]);
+          if (!isNaN(percent) && percent !== lastPercent) {
+            lastPercent = percent;
+            opts.onProgress?.({
+              percent,
+              stageName: `Downloading ${opts.type} (${Math.round(percent)}%)…`,
+            });
+          }
+        } else if (line.includes('[ExtractAudio]')) {
+          opts.onProgress?.({
+            percent: 95,
+            stageName: 'Extracting high-quality audio (320 kbps)…',
+          });
+        }
+      }
+    });
+
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    child.on('error', (err) => {
+      reject(err);
+    });
+
+    child.on('close', async (code) => {
+      if (code !== 0) {
+        return reject(new Error(`yt-dlp process failed with exit code ${code}: ${stderr.slice(-500)}`));
+      }
+
+      try {
+        // Check if output path exists as-is
+        if (fs.existsSync(opts.outputPath)) {
+          return resolve(opts.outputPath);
+        }
+
+        // Look for any file in outDir starting with baseName
+        const files = await fs.promises.readdir(outDir);
+        const match = files.find((f) => f.startsWith(`${baseName}.`) && !f.endsWith('.part') && !f.endsWith('.ytdl'));
+        if (match) {
+          const resolvedFile = path.join(outDir, match);
+          // If file extension differs from requested outputPath, rename or return
+          if (resolvedFile !== opts.outputPath) {
+            try {
+              await fs.promises.rename(resolvedFile, opts.outputPath);
+              return resolve(opts.outputPath);
+            } catch {
+              return resolve(resolvedFile);
+            }
+          }
+          return resolve(resolvedFile);
+        }
+
+        reject(new Error(`yt-dlp completed successfully but output file was not found in ${outDir}`));
+      } catch (err) {
+        reject(err);
+      }
+    });
+  });
+}
+

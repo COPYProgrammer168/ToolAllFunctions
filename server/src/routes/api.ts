@@ -21,7 +21,7 @@ import { ImageProcessor, type SupportedImageFormat } from '../services/ImageProc
 import { CaptionGenerator, cuesToSrt, cuesToVtt, cuesToTxt } from '../services/CaptionGenerator.js';
 import { SeoAnalyzer } from '../services/SeoAnalyzer.js';
 import { SitemapGenerator } from '../services/SitemapGenerator.js';
-import { sanitizeFilename } from '../utils/security.js';
+import { sanitizeFilename, validateRemoteUrl } from '../utils/security.js';
 import { DEFAULT_RATE_LIMIT_RETRY_AFTER_SEC } from '../utils/errors.js';
 import { rateLimit } from '../utils/rateLimiter.js';
 import { downloadToFile } from '../utils/httpDownload.js';
@@ -359,12 +359,40 @@ apiRouter.post('/media/analyze', mediaAnalyzeRateLimit, async (req, res) => {
 // (notably TikTok) during <video> preview playback. Supports HTTP Range.
 // Rides TT_PROXY when configured: CDN stream URLs are signed against the
 // resolving IP, so they must be replayed from the same address.
+apiRouter.options('/media/stream', (_req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Range, Accept, Origin, Content-Type');
+  res.setHeader('Access-Control-Max-Age', '86400');
+  res.sendStatus(204);
+});
+
 apiRouter.get('/media/stream', async (req, res) => {
   try {
     const target = req.query.url as string | undefined;
     if (!target || !/^https?:\/\//i.test(target)) {
       return res.status(400).json({ error: 'A valid url is required.' });
     }
+
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Range, Accept, Origin, Content-Type');
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Range, Content-Length, Accept-Ranges, Content-Type');
+
+    // On-the-fly HLS transcoding to MP3 for audio players (SoundCloud/YouTube HLS)
+    if (/\.m3u8(\?|$)/i.test(target) || target.includes('manifest.googlevideo.com/api/manifest/hls_playlist') || target.includes('/hls/')) {
+      res.setHeader('Content-Type', 'audio/mpeg');
+      const { spawn } = await import('node:child_process');
+      const hlsProxy = getProxy() ? ['-proxy', getProxy()!.url] : [];
+      const ffArgs = ['-y', ...hlsProxy, '-i', target, '-vn', '-c:a', 'libmp3lame', '-b:a', '192k', '-f', 'mp3', 'pipe:1'];
+      const child = spawn(ffmpegBin(), ffArgs, { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
+      res.on('close', () => {
+        try { child.kill('SIGKILL'); } catch {}
+      });
+      child.stdout.pipe(res);
+      return;
+    }
+
     const headers: Record<string, string> = buildStreamHeaders(target);
     if (typeof req.headers.range === 'string') {
       headers['Range'] = req.headers.range;
@@ -501,6 +529,11 @@ apiRouter.post('/media/download', async (req, res) => {
     let muxUrls: { video: string; audio: string } | null = null;
     let hlsVideoUrl: string | undefined = req.body.hlsVideoUrl;
     let hlsAudioUrl: string | undefined = req.body.hlsAudioUrl;
+    // Set only when the platform page could not be resolved to a direct/HLS
+    // stream and yt-dlp must handle the source itself. Comparing
+    // downloadTargetUrl with sourceUrl is not enough: that is also true for
+    // plain direct-media links and for requests that already carry HLS URLs.
+    let useYtDlp = false;
 
     // Explicit adaptive video+audio pair -> mux with ffmpeg.
     if (type === 'video' && req.body.videoUrl && req.body.audioUrl) {
@@ -538,27 +571,47 @@ apiRouter.post('/media/download', async (req, res) => {
                   resolved.rawVideoUrl ||
                   resolved.availableFormats.find((f) => f.type === 'video' && f.directDownloadUrl)?.directDownloadUrl;
             if (!direct) {
-              return res.status(400).json({
-                error:
-                  resolved.authorizedNotice ||
-                  'Could not resolve a direct downloadable stream for this URL (private, region-locked, age-restricted, or DRM protected). Try re-running the analysis or paste a direct media file link.',
-                technicalDetails: {
-                  platform: resolved.platform,
-                  downloadAuthorized: resolved.downloadAuthorized,
-                },
-              });
+              const { hasYtDlp } = await import('../utils/ytDlp.js');
+              if (await hasYtDlp()) {
+                useYtDlp = true;
+                downloadTargetUrl = sourceUrl;
+              } else {
+                return res.status(400).json({
+                  error:
+                    resolved.authorizedNotice ||
+                    'Could not resolve a direct downloadable stream for this URL (private, region-locked, age-restricted, or DRM protected). Try re-running the analysis or paste a direct media file link.',
+                  technicalDetails: {
+                    platform: resolved.platform,
+                    downloadAuthorized: resolved.downloadAuthorized,
+                  },
+                });
+              }
+            } else {
+              downloadTargetUrl = direct;
             }
-            downloadTargetUrl = direct;
           }
         }
       } catch (err: any) {
-        if (err?.code === 'rate_limited' || err?.status === 429) {
-          console.warn(`[media/download] platform rate-limited (ip ${clientIp(req)}): ${err?.message || err}`);
-        } else {
-          console.error('Media resolve error:', err?.message || err);
+        const { hasYtDlp } = await import('../utils/ytDlp.js');
+        // Never hand an unvalidated/internal URL to yt-dlp: resolver failures
+        // include SSRF and malformed-URL rejections, which must stay 400s.
+        const validation = await validateRemoteUrl(sourceUrl);
+        if (!validation.valid) {
+          return respondApiError(res, err, 400);
         }
-        // 429 when the platform is rate-limiting us, 400 otherwise.
-        return respondApiError(res, err, 400);
+        if (await hasYtDlp()) {
+          console.warn(`[media/download] resolve failed, falling back to yt-dlp for ${sourceUrl}: ${err?.message || err}`);
+          useYtDlp = true;
+          downloadTargetUrl = sourceUrl;
+        } else {
+          if (err?.code === 'rate_limited' || err?.status === 429) {
+            console.warn(`[media/download] platform rate-limited (ip ${clientIp(req)}): ${err?.message || err}`);
+          } else {
+            console.error('Media resolve error:', err?.message || err);
+          }
+          // 429 when the platform is rate-limiting us, 400 otherwise.
+          return respondApiError(res, err, 400);
+        }
       }
     }
 
@@ -592,7 +645,28 @@ apiRouter.post('/media/download', async (req, res) => {
     (async () => {
       try {
         let downloadedSource: string;
-        if (hlsVideoUrl && type === 'video') {
+        if (useYtDlp) {
+          MediaJobManager.emitProgress(job.id, {
+            status: 'DOWNLOADING',
+            stageName: 'Downloading with yt-dlp…',
+          });
+          const { downloadWithYtDlp } = await import('../utils/ytDlp.js');
+          await downloadWithYtDlp({
+            url: sourceUrl,
+            outputPath: job.outputPath,
+            type: type as any,
+            format,
+            customBitrate: requestedBitrate,
+            onProgress: (p) => {
+              MediaJobManager.emitProgress(job.id, {
+                status: 'DOWNLOADING',
+                percent: p.percent,
+                stageName: p.stageName || 'Downloading with yt-dlp…',
+              });
+            },
+          });
+          downloadedSource = job.outputPath;
+        } else if (hlsVideoUrl && type === 'video') {
           // Segmented HLS: ffmpeg fetches every segment itself, which is the
           // only way past the CDN's per-URL byte budget for progressive
           // streams. Video and audio manifests are mapped explicitly so the
@@ -670,7 +744,35 @@ apiRouter.post('/media/download', async (req, res) => {
           await fs.unlink(audioTmp).catch(() => {});
           downloadedSource = job.outputPath;
         } else {
-          downloadedSource = await MediaJobManager.startResumableDownload(job.id, downloadTargetUrl);
+          try {
+            downloadedSource = await MediaJobManager.startResumableDownload(job.id, downloadTargetUrl);
+          } catch (dlErr: any) {
+            const { hasYtDlp, downloadWithYtDlp } = await import('../utils/ytDlp.js');
+            if (await hasYtDlp() && sourceUrl) {
+              console.warn(`[media/download] Resumable download failed (${dlErr.message}), falling back to yt-dlp for ${sourceUrl}`);
+              MediaJobManager.emitProgress(job.id, {
+                status: 'DOWNLOADING',
+                stageName: 'Retrying download with yt-dlp…',
+              });
+              await downloadWithYtDlp({
+                url: sourceUrl,
+                outputPath: job.outputPath,
+                type: type as any,
+                format,
+                customBitrate: requestedBitrate,
+                onProgress: (p) => {
+                  MediaJobManager.emitProgress(job.id, {
+                    status: 'DOWNLOADING',
+                    percent: p.percent,
+                    stageName: p.stageName || 'Downloading with yt-dlp…',
+                  });
+                },
+              });
+              downloadedSource = job.outputPath;
+            } else {
+              throw dlErr;
+            }
+          }
         }
 
         MediaJobManager.emitProgress(job.id, {
@@ -733,6 +835,11 @@ async function processJobOutput(
   }
 
   if (type === 'audio') {
+    // yt-dlp already writes the requested container/bitrate directly to
+    // job.outputPath. Running the extractor with the same input and output path
+    // makes ffmpeg fail with "cannot edit existing files in-place".
+    if (opts.alreadyFinalized || downloadedSource === job.outputPath) return;
+
     // Audio extraction/conversion — the source may be a video or an audio file.
     const audioFormat = (format === 'original' ? 'm4a' : format) as 'mp3' | 'm4a' | 'aac' | 'wav' | 'flac';
     // MP3 exports are 320 kbps CBR across the app ("320 kbps (High Export)",
