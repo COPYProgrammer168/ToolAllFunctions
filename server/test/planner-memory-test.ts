@@ -5,6 +5,9 @@
  */
 import { OptimizationPlanner } from '../src/services/OptimizationPlanner.js';
 import { HardwareDetector } from '../src/services/HardwareDetector.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 const meta1080p30 = {
   filename: 'test.mp4',
@@ -120,6 +123,38 @@ function planFor(budget: number, meta: any, config: any) {
     HardwareDetector.ffmpegMemoryLimitMB() === 0,
     `got ${HardwareDetector.ffmpegMemoryLimitMB()}`
   );
+}
+
+{
+  // Regression guard for the old `1 << 42` bug: JS bitwise shifts are 32-bit,
+  // so that expression is 1024 and discarded every real cgroup limit.
+  const tmp = path.join(os.tmpdir(), `cgroup-limit-${process.pid}.txt`);
+  try {
+    fs.writeFileSync(tmp, '536870912');
+    check(
+      '512MB cgroup limit is accepted',
+      (HardwareDetector as any).readMemoryLimitFile(tmp) === 536870912,
+      'real limit was discarded'
+    );
+
+    fs.writeFileSync(tmp, '9223372036854771712');
+    check(
+      'cgroup v1 unlimited sentinel is ignored',
+      (HardwareDetector as any).readMemoryLimitFile(tmp) === 0,
+      'sentinel was treated as a real limit'
+    );
+
+    fs.writeFileSync(tmp, 'max');
+    check(
+      'cgroup v2 "max" is ignored',
+      (HardwareDetector as any).readMemoryLimitFile(tmp) === 0,
+      'max was treated as a real limit'
+    );
+  } finally {
+    try {
+      fs.rmSync(tmp, { force: true });
+    } catch {}
+  }
 }
 
 if (failures > 0) {

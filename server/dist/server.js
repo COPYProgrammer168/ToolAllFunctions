@@ -26,7 +26,15 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.get('/health', (_req, res) => {
-    res.json({ status: 'ok', timestamp: new Date().toISOString() });
+    res.json({
+        status: 'ok',
+        timestamp: new Date().toISOString(),
+        uptimeSec: Math.round(process.uptime()),
+        memoryBudgetMB: HardwareDetector.memoryBudgetMB(),
+        memoryBudgetSource: HardwareDetector.memoryBudgetSource(),
+        ffmpegMemoryLimitMB: HardwareDetector.ffmpegMemoryLimitMB(),
+        rssMB: Math.round(process.memoryUsage().rss / (1024 * 1024)),
+    });
 });
 app.use('/api', apiRouter);
 app.use(express.static(clientDist, { fallthrough: true, index: false }));
@@ -57,6 +65,9 @@ async function startServer() {
     console.log(`Hardware Acceleration: ${hw.hasNvidiaGpu ? `NVIDIA GPU (${hw.gpuName})` : 'CPU Multi-Core'}`);
     console.log(`Recommended Encoder: ${hw.recommendedEncoder}`);
     console.log(`CPU Cores: ${hw.cpuCores} | Free RAM: ${hw.freeMemoryMB} MB`);
+    console.log(`Memory budget: ${HardwareDetector.memoryBudgetMB()} MB (${HardwareDetector.memoryBudgetSource()}) | ` +
+        `ffmpeg watchdog: ${HardwareDetector.ffmpegMemoryLimitMB()} MB | ` +
+        `Node RSS: ${Math.round(process.memoryUsage().rss / (1024 * 1024))} MB`);
     console.log('----------------------------------------------------');
     const clientExists = fs.existsSync(clientDist);
     console.log(`[clientDist] ${clientDist}`);

@@ -2,10 +2,21 @@ import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
 import os from 'node:os';
 import fs from 'node:fs';
+import path from 'node:path';
 const execAsync = promisify(exec);
+const MIB = 1024 * 1024;
+/**
+ * cgroup v1 reports values near 2^63-1 when the limit is unset. Anything this
+ * large is a sentinel, not a real memory budget. NOTE: `1 << 42` is NOT 2^42
+ * in JavaScript — bitwise operators are 32-bit and it evaluates to 1024, which
+ * previously discarded every real cgroup limit and let the planner believe a
+ * 512MB Render instance had the host's 11GB.
+ */
+const CGROUP_UNLIMITED_BYTES = 2 ** 42;
 export class HardwareDetector {
     static cachedInfo = null;
     static cachedMemoryBudgetMB = null;
+    static cachedMemoryBudgetSource = 'unknown';
     /**
      * Real memory budget for THIS instance.
      *
@@ -18,43 +29,123 @@ export class HardwareDetector {
         if (this.cachedMemoryBudgetMB !== null) {
             return this.cachedMemoryBudgetMB;
         }
-        let bytes = 0;
         const envMB = Number.parseInt(process.env.MEMORY_LIMIT_MB ?? '', 10);
         if (Number.isFinite(envMB) && envMB > 0) {
-            // The override is expressed in MB already...
-            bytes = envMB * 1024 * 1024;
+            this.cachedMemoryBudgetSource = 'MEMORY_LIMIT_MB';
+            this.cachedMemoryBudgetMB = Math.max(64, envMB);
+            return this.cachedMemoryBudgetMB;
         }
-        else {
-            // cgroup v2 (most modern Linux incl. Render/Docker): "max" means unset.
-            bytes = this.readCgroupMemoryBytes(['/sys/fs/cgroup/memory.max']);
-            if (!bytes) {
-                // cgroup v1 layout.
-                bytes = this.readCgroupMemoryBytes([
-                    '/sys/fs/cgroup/memory/memory.limit_in_bytes',
-                ]);
-            }
-            // Sanity check: values near (1<<52)+ are "no limit" sentinels on v1.
-            if (bytes && bytes > (1 << 42)) {
-                bytes = 0;
-            }
+        // Node 20+ asks libuv for the cgroup/OS limit directly. This works even
+        // when the cgroup files are not visible at the usual mount paths.
+        const constrainedBytes = typeof process.constrainedMemory === 'function' ? process.constrainedMemory() : 0;
+        if (constrainedBytes > 0 && constrainedBytes < CGROUP_UNLIMITED_BYTES) {
+            this.cachedMemoryBudgetSource = 'process.constrainedMemory';
+            this.cachedMemoryBudgetMB = Math.max(64, Math.round(constrainedBytes / MIB));
+            return this.cachedMemoryBudgetMB;
         }
-        if (!bytes) {
-            bytes = os.totalmem();
+        const cgroupBytes = this.readCgroupMemoryLimitBytes();
+        if (cgroupBytes > 0) {
+            this.cachedMemoryBudgetSource = 'cgroup';
+            this.cachedMemoryBudgetMB = Math.max(64, Math.round(cgroupBytes / MIB));
+            return this.cachedMemoryBudgetMB;
         }
-        this.cachedMemoryBudgetMB = Math.max(64, Math.round(bytes / (1024 * 1024)));
+        // Container/hosted environments often do not expose the cgroup files (or
+        // hide them behind a different path). Never trust the host's total RAM
+        // there: that is how a 512MB Render instance planned a ~1.1GB MCI
+        // pipeline and got OOM-killed, surfacing as SSE drops + 502s.
+        if (this.isContainerizedHost()) {
+            this.cachedMemoryBudgetSource = 'hosted-default';
+            this.cachedMemoryBudgetMB = 512;
+            return this.cachedMemoryBudgetMB;
+        }
+        this.cachedMemoryBudgetSource = 'os.totalmem';
+        this.cachedMemoryBudgetMB = Math.max(64, Math.round(os.totalmem() / MIB));
         return this.cachedMemoryBudgetMB;
     }
-    static readCgroupMemoryBytes(files) {
-        for (const file of files) {
-            try {
-                const raw = fs.readFileSync(file, 'utf8').trim();
-                const bytes = Number.parseInt(raw, 10);
-                if (Number.isFinite(bytes) && bytes > 0)
-                    return bytes;
+    /** Where `memoryBudgetMB()` got its number (useful in `/health`). */
+    static memoryBudgetSource() {
+        if (this.cachedMemoryBudgetMB === null) {
+            this.memoryBudgetMB();
+        }
+        return this.cachedMemoryBudgetSource;
+    }
+    /**
+     * Reads the cgroup limit for this process, walking the nested v2/v1 path
+     * from `/proc/self/cgroup` before falling back to the mount roots.
+     */
+    static readCgroupMemoryLimitBytes() {
+        const candidates = [];
+        try {
+            const self = fs.readFileSync('/proc/self/cgroup', 'utf8');
+            // cgroup v2: "0::/user.slice/.../app.scope"
+            const v2Match = self.match(/^0::(.+)$/m);
+            if (v2Match) {
+                let dir = path.posix.join('/sys/fs/cgroup', v2Match[1].trim());
+                while (dir.startsWith('/sys/fs/cgroup')) {
+                    candidates.push(path.posix.join(dir, 'memory.max'));
+                    if (dir === '/sys/fs/cgroup')
+                        break;
+                    dir = path.posix.dirname(dir);
+                }
             }
-            catch { }
+            // cgroup v1: "5:memory:/docker/<id>"
+            const v1Match = self.match(/^\d+:memory:(.+)$/m);
+            if (v1Match) {
+                let dir = path.posix.join('/sys/fs/cgroup/memory', v1Match[1].trim());
+                while (dir.startsWith('/sys/fs/cgroup/memory')) {
+                    candidates.push(path.posix.join(dir, 'memory.limit_in_bytes'));
+                    if (dir === '/sys/fs/cgroup/memory')
+                        break;
+                    dir = path.posix.dirname(dir);
+                }
+            }
+        }
+        catch { }
+        candidates.push('/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/memory/memory.limit_in_bytes');
+        for (const file of new Set(candidates)) {
+            const bytes = this.readMemoryLimitFile(file);
+            if (bytes > 0)
+                return bytes;
         }
         return 0;
+    }
+    static readMemoryLimitFile(file) {
+        try {
+            const raw = fs.readFileSync(file, 'utf8').trim();
+            if (!raw || raw === 'max')
+                return 0;
+            const bytes = Number.parseInt(raw, 10);
+            if (!Number.isFinite(bytes) || bytes <= 0)
+                return 0;
+            if (bytes >= CGROUP_UNLIMITED_BYTES)
+                return 0;
+            return bytes;
+        }
+        catch {
+            return 0;
+        }
+    }
+    /** True when `os.totalmem()` is the host's RAM, not this process's budget. */
+    static isContainerizedHost() {
+        const env = process.env;
+        if (env.RENDER || env.RENDER_SERVICE_ID || env.RENDER_INSTANCE_ID)
+            return true;
+        if (env.DYNO || env.FLY_APP_NAME || env.RAILWAY_ENVIRONMENT || env.RAILWAY_PROJECT_ID)
+            return true;
+        if (env.K_SERVICE || env.CLOUD_RUN_JOB || env.VERCEL || env.AWS_LAMBDA_FUNCTION_NAME)
+            return true;
+        try {
+            if (fs.existsSync('/.dockerenv'))
+                return true;
+        }
+        catch { }
+        try {
+            const cgroup = fs.readFileSync('/proc/1/cgroup', 'utf8');
+            if (/docker|kubepods|containerd|garden|ecs|fargate/i.test(cgroup))
+                return true;
+        }
+        catch { }
+        return false;
     }
     static async detect() {
         if (this.cachedInfo) {
