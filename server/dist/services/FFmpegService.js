@@ -197,11 +197,17 @@ export class FFmpegService {
         }
         // Assemble FFmpeg CLI arguments
         const args = ['-y'];
+        const threadBudget = String(HardwareDetector.threadBudget());
         // The filter graph creates worker threads per filter. On a small instance
         // (many host cores visible, little RAM) each worker keeps its own frame
         // pool, so cap the graph to a single thread before the input is opened.
         if (memoryBudgetMB <= 2048) {
             args.push('-filter_threads', '1', '-filter_complex_threads', '1');
+            // `-threads` before `-i` applies to the DECODER. A 4K H.264 stream can
+            // hold many full-resolution reference frames per thread; leaving this
+            // at "all host cores" is what pushed 4K sources over 320MB even after
+            // the filters were downscaled.
+            args.push('-threads', threadBudget);
         }
         // If preview, limit duration
         if (isPreview) {
@@ -211,7 +217,7 @@ export class FFmpegService {
         // Cap encoder threads: the default `-threads 0` uses every host core,
         // and x264's per-thread frame buffers OOM small instances (Render free
         // tier exposes many host cores but only ~512MB RAM).
-        args.push('-threads', String(HardwareDetector.threadBudget()));
+        args.push('-threads', threadBudget);
         // Apply video filters
         if (filterComplexArg) {
             args.push('-filter_complex', filterComplexArg, '-map', '[v_out]');
