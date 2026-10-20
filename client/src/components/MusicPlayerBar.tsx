@@ -3,21 +3,29 @@ import { Play, Pause, ListMusic, X, Music } from 'lucide-react';
 import { playerStore, usePlayer } from '../services/player';
 
 function formatTime(s: number) {
-  if (!s || Number.isNaN(s)) return '0:00';
+  if (!Number.isFinite(s) || s < 0) return '0:00';
   const m = Math.floor(s / 60);
   const sec = Math.floor(s % 60);
   return `${m}:${String(sec).padStart(2, '0')}`;
+}
+
+/** Returns a usable duration in seconds, or 0 for Infinity/NaN/non-positive values. */
+function finiteDuration(value?: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0;
 }
 
 export const MusicPlayerBar: React.FC = () => {
   const { tracks, currentId, playing } = usePlayer();
   const current = tracks.find((t) => t.id === currentId) || null;
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const loadedUrlRef = useRef<string | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [progress, setProgress] = useState({ current: 0, duration: 0 });
   const [showList, setShowList] = useState(false);
+  const totalDuration =
+    finiteDuration(progress.duration) || finiteDuration(current?.duration);
 
   useEffect(() => {
     if (!audioRef.current) audioRef.current = new Audio();
@@ -94,9 +102,11 @@ export const MusicPlayerBar: React.FC = () => {
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio || !current) return;
-    if (audio.src !== current.url) {
+    if (loadedUrlRef.current !== current.url) {
+      loadedUrlRef.current = current.url;
       audio.src = current.url;
       audio.currentTime = 0;
+      setProgress({ current: 0, duration: finiteDuration(current.duration) });
     }
     if (playing) {
       audio.play().catch(() => playerStore.setPlaying(false));
@@ -108,15 +118,31 @@ export const MusicPlayerBar: React.FC = () => {
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return;
-    const onTime = () => setProgress({ current: audio.currentTime, duration: audio.duration || 0 });
-    const onMeta = () => setProgress({ current: 0, duration: audio.duration || 0 });
+    const onTime = () => {
+      setProgress((prev) => ({
+        current: audio.currentTime,
+        duration: finiteDuration(audio.duration) || prev.duration,
+      }));
+    };
+    const onMeta = () => {
+      setProgress((prev) => ({
+        current: 0,
+        duration: finiteDuration(audio.duration) || prev.duration,
+      }));
+    };
+    const onDuration = () => {
+      const duration = finiteDuration(audio.duration);
+      if (duration) setProgress((prev) => ({ ...prev, duration }));
+    };
     const onEnd = () => playerStore.setPlaying(false);
     audio.addEventListener('timeupdate', onTime);
     audio.addEventListener('loadedmetadata', onMeta);
+    audio.addEventListener('durationchange', onDuration);
     audio.addEventListener('ended', onEnd);
     return () => {
       audio.removeEventListener('timeupdate', onTime);
       audio.removeEventListener('loadedmetadata', onMeta);
+      audio.removeEventListener('durationchange', onDuration);
       audio.removeEventListener('ended', onEnd);
     };
   }, []);
@@ -166,9 +192,9 @@ export const MusicPlayerBar: React.FC = () => {
               <input
                 type="range"
                 min={0}
-                max={progress.duration || 1}
+                max={totalDuration || 1}
                 step={0.5}
-                value={progress.current}
+                value={totalDuration ? Math.min(progress.current, totalDuration) : progress.current}
                 onChange={(e) => {
                   const v = Number(e.target.value);
                   if (audioRef.current) audioRef.current.currentTime = v;
@@ -176,7 +202,7 @@ export const MusicPlayerBar: React.FC = () => {
                 }}
                 className="flex-1 accent-fuchsia-400 h-1.5 cursor-pointer"
               />
-              <span className="text-[10px] font-mono text-neutral-500">{formatTime(progress.duration)}</span>
+              <span className="text-[10px] font-mono text-neutral-500">{formatTime(totalDuration)}</span>
             </div>
           </div>
 

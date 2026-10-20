@@ -5,6 +5,9 @@ export interface PlayerTrack {
   title: string;
   url: string;
   creator?: string;
+  /** Known duration in seconds from the platform metadata. Used as a fallback
+   *  when the proxied audio stream has no Content-Length (duration = Infinity). */
+  duration?: number;
 }
 
 interface PlayerState {

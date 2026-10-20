@@ -244,7 +244,13 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
     };
   }, [analysis, handleRequestError]);
 
-  const handleTogglePlay = async (track: { title: string; url: string; creator?: string; unavailable?: string }) => {
+  const handleTogglePlay = async (track: {
+    title: string;
+    url: string;
+    creator?: string;
+    duration?: number;
+    unavailable?: string;
+  }) => {
     // Unavailable entries have no resolvable stream, so playing them is a no-op.
     if (actionsDisabled || track.unavailable) return;
     try {
@@ -258,7 +264,13 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
         setError('No playable stream available for this track.');
         return;
       }
-      playerStore.addAndPlay({ id: track.url, title: track.title, url: stream, creator: track.creator });
+      playerStore.addAndPlay({
+        id: track.url,
+        title: track.title,
+        url: stream,
+        creator: track.creator,
+        duration: track.duration,
+      });
     } catch (err) {
       handleRequestError(err, `Playback failed: ${(err as Error)?.message || err}`);
     } finally {
@@ -846,8 +858,17 @@ export const UniversalMediaInput: React.FC<UniversalMediaInputProps> = ({
                         </div>
                       </div>
                       <div className="flex items-center gap-2 shrink-0">
-                        <span className="px-2 py-1 rounded-lg bg-fuchsia-500/10 border border-fuchsia-500/30 text-[11px] font-mono text-fuchsia-300 whitespace-nowrap">
-                          {trackBitrates[t.url] ? `${trackBitrates[t.url]} > 320` : '… > 320'}
+                        <span
+                          className="px-2 py-1 rounded-lg bg-fuchsia-500/10 border border-fuchsia-500/30 text-[11px] font-mono text-fuchsia-300 whitespace-nowrap"
+                          title={
+                            trackBitrates[t.url]
+                              ? `Source ${trackBitrates[t.url]} kbps; download transcodes to MP3 320 kbps`
+                              : 'Downloads as MP3 320 kbps'
+                          }
+                        >
+                          {trackBitrates[t.url]
+                            ? `${trackBitrates[t.url]} → 320 kbps`
+                            : '→ 320 kbps'}
                         </span>
                         <button
                           onClick={async () => {
