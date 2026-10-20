@@ -535,6 +535,18 @@ apiRouter.post('/media/download', async (req, res) => {
     // plain direct-media links and for requests that already carry HLS URLs.
     let useYtDlp = false;
 
+    // SoundCloud's HLS URLs carry a short-lived CloudFront signature. The
+    // analysis cache can keep them for up to 10 minutes, so a URL returned by
+    // `/media/analyze` may already be expired by the time the user clicks
+    // Download. Drop any client-supplied SoundCloud HLS URL and always resolve
+    // a fresh one below, bypassing the cache.
+    const isSoundCloudPage =
+      !!sourceUrl && /^https?:\/\/(?:www\.|m\.|on\.)?soundcloud\.com\//i.test(sourceUrl);
+    if (isSoundCloudPage) {
+      hlsAudioUrl = undefined;
+      hlsVideoUrl = undefined;
+    }
+
     // Explicit adaptive video+audio pair -> mux with ffmpeg.
     if (type === 'video' && req.body.videoUrl && req.body.audioUrl) {
       muxUrls = { video: req.body.videoUrl, audio: req.body.audioUrl };
@@ -543,7 +555,9 @@ apiRouter.post('/media/download', async (req, res) => {
 
     if (!muxUrls && !directUrl && !hlsVideoUrl && !hlsAudioUrl && sourceUrl && !/\.(mp4|webm|mov|mkv|avi|m4v|mp3|m4a|wav|flac|aac|ogg|jpg|jpeg|png|webp|avif|gif)(\?|$)/i.test(sourceUrl)) {
       try {
-        const resolved = await MediaSourceResolver.resolveAndAnalyze(sourceUrl);
+        const resolved = await MediaSourceResolver.resolveAndAnalyze(sourceUrl, {
+          skipCache: isSoundCloudPage,
+        });
         // Prefer the segmented HLS variants when the analysis resolved them:
         // progressive streams are throttled after ~23 MB per URL.
         const hlsVideo = resolved.availableFormats.find((f) => f.type === 'video' && f.hlsVideoUrl);
