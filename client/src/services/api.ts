@@ -106,12 +106,24 @@ export async function cancelJob(jobId: string): Promise<boolean> {
   return Boolean(data.success);
 }
 
+/** Error from a job status request, keeping the HTTP status so the UI can tell
+ *  "server restarting" (502/503) from "job no longer exists" (404). */
+export class JobApiError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'JobApiError';
+    this.status = status;
+  }
+}
+
 /** Fetches an optimization job's current progress. Throws on 404 (job lost). */
 export async function getOptimizationJob(jobId: string): Promise<{ id: string; progress: JobProgress }> {
   const res = await fetch(`/api/jobs/${jobId}`);
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    throw new Error(err.error || `Job lookup failed: ${res.status}`);
+    throw new JobApiError(err.error || `Job lookup failed: ${res.status}`, res.status);
   }
   return res.json();
 }

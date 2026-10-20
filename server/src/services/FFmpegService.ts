@@ -129,6 +129,7 @@ export class FFmpegService {
     const isPreview = plan.config.isPreview;
     const previewDuration = plan.config.previewDuration || 5;
     const effectiveDuration = isPreview ? Math.min(meta.duration, previewDuration) : meta.duration;
+    const memoryBudgetMB = HardwareDetector.memoryBudgetMB();
 
     // Build video filter chains
     const filterParts: string[] = [];
@@ -184,6 +185,23 @@ export class FFmpegService {
       filterParts.push(`fps=${plan.filters.targetFps}`);
     }
 
+    // Reduce the working resolution BEFORE the temporal/denoise filters. On a
+    // 4K source, minterpolate/denoise otherwise allocate several full 4K
+    // frames each (exactly the buffers that OOM small instances) even though
+    // the final canvas is 1080p. Scaling first keeps the same output size
+    // while cutting the filter frame pools by up to 4×.
+    const workingWidth = isTiktok && isLandscape ? canvasWidth : plan.filters.scaleWidth;
+    const workingHeight = isTiktok && isLandscape ? canvasHeight : plan.filters.scaleHeight;
+    if (
+      workingWidth &&
+      workingHeight &&
+      meta.width * meta.height > workingWidth * workingHeight * 1.1
+    ) {
+      filterParts.unshift(
+        `scale=${workingWidth}:${workingHeight}:force_original_aspect_ratio=decrease:flags=lanczos`
+      );
+    }
+
     // Construct complex filter graph or simple filter chain
     let filterComplexArg: string | undefined;
     let simpleVfArg: string | undefined;
@@ -231,6 +249,13 @@ export class FFmpegService {
 
     // Assemble FFmpeg CLI arguments
     const args: string[] = ['-y'];
+
+    // The filter graph creates worker threads per filter. On a small instance
+    // (many host cores visible, little RAM) each worker keeps its own frame
+    // pool, so cap the graph to a single thread before the input is opened.
+    if (memoryBudgetMB <= 2048) {
+      args.push('-filter_threads', '1', '-filter_complex_threads', '1');
+    }
 
     // If preview, limit duration
     if (isPreview) {
@@ -283,7 +308,6 @@ export class FFmpegService {
       // buffers) is large at high resolutions. Cap the encoder preset and
       // lookahead on small memory budgets so encoding survives in a 512MB
       // container instead of getting OOM-killed mid-job.
-      const memoryBudgetMB = HardwareDetector.memoryBudgetMB();
       const encoderPreset = memoryBudgetMB <= 1024
         ? 'veryfast'
         : memoryBudgetMB <= 2048 && plan.encoding.preset === 'slow'
@@ -347,10 +371,62 @@ export class FFmpegService {
 
       let lastPercent = 5;
       let stderrBuffer = '';
+      let killedForMemory = false;
+
+      // Kernel OOM kills take down the whole container, which is what turned
+      // a heavy transcode into 502s on every API call and a dead SSE stream.
+      // Watch the encoder's RSS and stop it first, so the job can fail with a
+      // readable message while the server (and the status endpoint) stays up.
+      const budgetMB = HardwareDetector.memoryBudgetMB();
+      const hardLimitMB = HardwareDetector.ffmpegMemoryLimitMB();
+      const currentLimitMB = () => {
+        if (hardLimitMB <= 0) return 0;
+        // Node's own footprint changes as the process serves requests. Keep a
+        // small reserve for the kernel instead of assuming a fixed baseline.
+        const nodeRssMB = Math.round(process.memoryUsage().rss / (1024 * 1024));
+        return Math.max(128, Math.min(hardLimitMB, budgetMB - nodeRssMB - 64));
+      };
+      const memoryLimitMB = currentLimitMB();
+      let watchdog: ReturnType<typeof setInterval> | undefined;
+      if (memoryLimitMB > 0 && proc.pid) {
+        watchdog = setInterval(() => {
+          const rssMB = HardwareDetector.processRssMB(proc.pid!);
+          const limitMB = currentLimitMB();
+          if (limitMB > 0 && rssMB > 0 && rssMB >= limitMB) {
+            killedForMemory = true;
+            console.error(
+              `[ffmpeg] job ${jobId} reached ${rssMB}MB (limit ${limitMB}MB); ` +
+                'stopping it before the container runs out of memory.'
+            );
+            if (watchdog) {
+              clearInterval(watchdog);
+              watchdog = undefined;
+            }
+            try {
+              proc.kill('SIGKILL');
+            } catch {}
+          }
+        }, 1000);
+        watchdog.unref?.();
+      }
+
+      const clearWatchdog = () => {
+        if (watchdog) {
+          clearInterval(watchdog);
+          watchdog = undefined;
+        }
+      };
 
       proc.stderr.on('data', (chunk: Buffer) => {
         const text = chunk.toString();
         stderrBuffer += text;
+
+        // Only the tail is used for the failure message. Keeping every line
+        // of a multi-hour encode in memory is an avoidable leak on the small
+        // instances this app targets.
+        if (stderrBuffer.length > 64_000) {
+          stderrBuffer = stderrBuffer.slice(-32_000);
+        }
 
         // Parse FFmpeg progress lines:
         // frame=  120 fps= 45 q=21.0 size=    1024kB time=00:00:04.00 bitrate=2097.2kbits/s speed=1.5x
@@ -389,12 +465,23 @@ export class FFmpegService {
       });
 
       proc.on('error', (err) => {
+        clearWatchdog();
         this.activeProcesses.delete(jobId);
         reject(err);
       });
 
       proc.on('close', (code, signal) => {
+        clearWatchdog();
         this.activeProcesses.delete(jobId);
+
+        if (killedForMemory) {
+          const err: any = new Error(
+            `The encoder exceeded this server's ${HardwareDetector.memoryBudgetMB()}MB memory budget. ` +
+              'Try Fast Optimize, a lower target resolution, or the 5-second preview.'
+          );
+          err.isMemory = true;
+          return reject(err);
+        }
         if (signal === 'SIGKILL' || signal === 'SIGTERM') {
           const err: any = new Error('Job was cancelled by user');
           err.isCancelled = true;

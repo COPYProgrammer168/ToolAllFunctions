@@ -34,6 +34,7 @@ import {
   createOptimizationJob,
   subscribeJobProgress,
   getOptimizationJob,
+  JobApiError,
   cancelJob,
   fetchHardwareInfo,
   sendMediaToOptimizer,
@@ -94,9 +95,19 @@ function App() {
   });
   const [activeTab, setActiveTab] = useState<'optimize' | 'compare' | 'inspect'>('optimize');
   const previewVideoRef = useRef<HTMLVideoElement>(null);
+  // Stops the SSE connection / fallback polling for the job currently shown.
+  const stopJobTrackingRef = useRef<(() => void) | null>(null);
   const [previewPlaying, setPreviewPlaying] = useState(false);
   const [previewTime, setPreviewTime] = useState(0);
   const [previewDuration, setPreviewDuration] = useState(0);
+
+  const stopJobTracking = useCallback(() => {
+    stopJobTrackingRef.current?.();
+    stopJobTrackingRef.current = null;
+  }, []);
+
+  // Never leave an SSE stream (or a polling timer) running after unmount.
+  useEffect(() => () => stopJobTrackingRef.current?.(), []);
 
   useEffect(() => {
     fetchHardwareInfo().then(setHardware).catch(console.error);
@@ -189,60 +200,135 @@ function App() {
 
   const startOptimization = async (isPreview = false) => {
     if (!tempPath) return;
+
+    // A previous job's stream/poller must not keep writing into this run.
+    stopJobTracking();
+
     try {
       const { jobId } = await createOptimizationJob({
         tempPath,
         originalName,
         config: { ...config, isPreview, previewDuration: 5 },
       });
+
+      const initialProgress: JobProgress = {
+        state: 'PLANNING',
+        percent: 0,
+        stageName: 'Starting optimization pipeline…',
+        currentFrame: 0,
+        totalFrames: 0,
+        fps: 0,
+        speed: '0x',
+        timeRemainingSec: 0,
+        warnings: [],
+      };
+
+      let cancelled = false;
+      let unsubscribeSse: (() => void) | null = null;
+      let pollTimer: ReturnType<typeof setTimeout> | undefined;
+      let pollStartedAt = 0;
+      let pollAttempt = 0;
+
+      const stopTracking = () => {
+        cancelled = true;
+        unsubscribeSse?.();
+        unsubscribeSse = null;
+        if (pollTimer) {
+          clearTimeout(pollTimer);
+          pollTimer = undefined;
+        }
+        if (stopJobTrackingRef.current === stopTracking) {
+          stopJobTrackingRef.current = null;
+        }
+      };
+      stopJobTrackingRef.current = stopTracking;
+
+      const applyProgress = (progress: JobProgress) => {
+        if (cancelled) return;
+        // Merge instead of replacing: SSE updates and the status endpoint can
+        // both omit optional fields (validationReport, outputUrl, …).
+        setJobProgress((prev) => ({ ...(prev ?? initialProgress), ...progress }));
+        if (progress.state === 'COMPLETED') {
+          stopTracking();
+          setView('RESULT');
+        } else if (progress.state === 'FAILED' || progress.state === 'CANCELLED') {
+          stopTracking();
+        }
+      };
+
+      const failTracking = (message: string, technicalError: string) => {
+        applyProgress({
+          ...initialProgress,
+          state: 'FAILED',
+          stageName: 'Optimization interrupted',
+          error: message,
+          technicalError,
+        });
+      };
+
+      /**
+       * Fallback used when the EventSource dies (proxy timeout, server restart,
+       * 502 during a redeploy). One lookup is not enough: a restarting server
+       * answers 502 for a while and 404 only once it is back and the in-memory
+       * job is gone. Retry transient failures, then show an actionable error.
+       */
+      const pollJobStatus = async () => {
+        if (cancelled) return;
+        const elapsed = Date.now() - pollStartedAt;
+        try {
+          const job = await getOptimizationJob(jobId);
+          pollAttempt = 0;
+          applyProgress(job.progress);
+        } catch (err: any) {
+          if (cancelled) return;
+
+          if (err instanceof JobApiError && err.status === 404) {
+            failTracking(
+              'The server restarted and this optimization job was lost. Please run the optimization again.',
+              'GET /api/jobs/:id returned 404 (job no longer exists).'
+            );
+            return;
+          }
+
+          // 502/503/504 and network errors are expected while the service
+          // restarts — keep polling with exponential backoff.
+          if (elapsed < 120_000) {
+            pollAttempt += 1;
+            const delay = Math.min(2000 * 2 ** Math.min(pollAttempt - 1, 3), 15_000);
+            pollTimer = setTimeout(() => {
+              void pollJobStatus();
+            }, delay);
+            return;
+          }
+
+          failTracking(
+            'Lost connection to the server while the video was processing. The server may have restarted — please try again.',
+            String(err?.message || err)
+          );
+        }
+      };
+
       setCurrentJobId(jobId);
+      setJobProgress(initialProgress);
       setView('PROCESSING');
 
-      const unsubscribe = subscribeJobProgress(
+      unsubscribeSse = subscribeJobProgress(
         jobId,
-        (progress) => {
-          setJobProgress(progress);
-          if (progress.state === 'COMPLETED') {
-            setView('RESULT');
-            unsubscribe();
-          } else if (progress.state === 'FAILED' || progress.state === 'CANCELLED') {
-            unsubscribe();
-          }
-        },
-        async (err) => {
-          console.error('SSE Error:', err);
-          unsubscribe();
-          // The stream only dies when the server restarts (e.g. after a
-          // resource failure) or drops the connection. Poll the job once to
-          // get the real state instead of spinning forever.
-          try {
-            const job = await getOptimizationJob(jobId);
-            if (job) {
-              setJobProgress({
-                state: job.progress.state,
-                percent: job.progress.percent,
-                stageName: job.progress.stageName,
-                currentFrame: job.progress.currentFrame,
-                totalFrames: job.progress.totalFrames,
-                fps: job.progress.fps,
-                speed: job.progress.speed,
-                timeRemainingSec: job.progress.timeRemainingSec,
-                error: job.progress.error,
-                technicalError: job.progress.technicalError,
-                warnings: job.progress.warnings,
-              });
-              if (
-                job.progress.state === 'COMPLETED' ||
-                job.progress.state === 'FAILED' ||
-                job.progress.state === 'CANCELLED'
-              ) {
-                if (job.progress.state === 'COMPLETED') setView('RESULT');
-              }
-            }
-          } catch (fetchErr: any) {
-            // Job record missing = the server restarted and lost the job.
-            console.error('Job status lookup after SSE error failed:', fetchErr);
-          }
+        applyProgress,
+        (err) => {
+          if (cancelled) return;
+          console.warn('SSE stream interrupted; falling back to status polling:', err);
+          // EventSource reports network drops and non-200 responses (e.g. the
+          // 502 while the server restarts) as a generic Event. Close it (its
+          // own retry would hammer the down service) and poll status instead.
+          unsubscribeSse?.();
+          unsubscribeSse = null;
+          setJobProgress((prev) =>
+            prev ? { ...prev, stageName: 'Connection interrupted — checking job status…' } : prev
+          );
+          pollStartedAt = Date.now();
+          pollAttempt = 0;
+          void pollJobStatus();
         }
       );
     } catch (err: any) {
@@ -251,6 +337,7 @@ function App() {
   };
 
   const handleCancel = async () => {
+    stopJobTracking();
     if (currentJobId) {
       await cancelJob(currentJobId);
       setCurrentJobId(null);
@@ -260,6 +347,7 @@ function App() {
   };
 
   const handleReset = () => {
+    stopJobTracking();
     setView('IDLE');
     setReport(null);
     setJobProgress(null);

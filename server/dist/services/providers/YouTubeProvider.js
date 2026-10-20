@@ -748,9 +748,26 @@ export class YouTubeProvider {
             const isHls = (f) => f?.protocol === 'm3u8' ||
                 f?.protocol === 'm3u8_native' ||
                 /hls_playlist|manifest\.googlevideo/i.test(`${f?.url || ''}`);
-            if (!isHls)
+            const formats = json?.formats || [];
+            const hlsFormats = formats.filter((f) => f?.url && isHls(f));
+            if (hlsFormats.length === 0) {
+                const audioOnly = formats
+                    .filter((f) => f?.url && f.vcodec === 'none' && f.acodec !== 'none')
+                    .sort((a, b) => (b.tbr || b.abr || 0) - (a.tbr || a.abr || 0));
+                const videoMuxed = formats
+                    .filter((f) => f?.url && f.vcodec !== 'none' && f.acodec !== 'none')
+                    .sort((a, b) => (b.height || 0) - (a.height || 0));
+                const bestAud = audioOnly[0];
+                const bestMux = videoMuxed[0];
+                if (bestAud || bestMux) {
+                    return {
+                        videoUrl: bestMux?.url,
+                        audioUrl: bestAud?.url || bestMux?.url,
+                        resolution: bestMux?.height ? `${bestMux.height}p` : undefined,
+                    };
+                }
                 return {};
-            const hlsFormats = (json?.formats || []).filter((f) => f?.url && isHls(f));
+            }
             // HLS audio variants report `vcodec: 'none'` with `acodec` often absent
             // entirely (None), so the check must treat a missing codec as audio.
             const isVideoHls = (f) => !!f.vcodec && f.vcodec !== 'none';

@@ -121,27 +121,67 @@ export class JobManager {
     const set = this.listeners.get(jobId)!;
     set.add(res);
 
-    // Send current state immediately
+    // Reconnect quickly if the stream drops, and send the current state
+    // immediately so a late subscriber does not stare at a blank screen.
+    res.write('retry: 2000\n\n');
     const job = this.jobs.get(jobId);
     if (job) {
       res.write(`data: ${JSON.stringify(job.progress)}\n\n`);
     }
 
-    res.on('close', () => {
+    let heartbeat: ReturnType<typeof setInterval> | undefined;
+
+    const cleanup = () => {
+      if (heartbeat) {
+        clearInterval(heartbeat);
+        heartbeat = undefined;
+      }
       set.delete(res);
       if (set.size === 0) {
         this.listeners.delete(jobId);
       }
-    });
+    };
+
+    // Render/other reverse proxies drop idle connections after ~30-100s.
+    // A long ffmpeg run can be quiet for longer than that (e.g. while a slow
+    // filter buffers), which used to surface as "SSE Error" and, when the
+    // server was restarted by an OOM kill, a 502 on every API call.
+    // Comment frames are ignored by EventSource but reset proxy idle timers.
+    heartbeat = setInterval(() => {
+      try {
+        if (res.writableEnded || res.destroyed) {
+          cleanup();
+          return;
+        }
+        res.write(': keepalive\n\n');
+      } catch {
+        cleanup();
+      }
+    }, 15_000);
+    heartbeat.unref?.();
+
+    res.on('close', cleanup);
+    res.on('error', cleanup);
   }
 
   public static broadcast(jobId: string, progress: JobProgress) {
     const set = this.listeners.get(jobId);
-    if (set) {
-      const payload = `data: ${JSON.stringify(progress)}\n\n`;
-      for (const res of set) {
+    if (!set) return;
+
+    const payload = `data: ${JSON.stringify(progress)}\n\n`;
+    for (const res of [...set]) {
+      try {
+        if (res.writableEnded || res.destroyed) {
+          set.delete(res);
+          continue;
+        }
         res.write(payload);
+      } catch {
+        set.delete(res);
       }
+    }
+    if (set.size === 0) {
+      this.listeners.delete(jobId);
     }
   }
 

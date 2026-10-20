@@ -126,6 +126,32 @@ export class HardwareDetector {
   }
 
   /**
+   * Resident memory of a process in MB. Reads `/proc` on Linux (where hosted
+   * containers run) and returns 0 when the information is unavailable.
+   */
+  public static processRssMB(pid: number): number {
+    if (process.platform !== 'linux') return 0;
+    try {
+      const status = fs.readFileSync(`/proc/${pid}/status`, 'utf8');
+      const match = status.match(/^VmRSS:\s+(\d+)\s+kB$/m);
+      return match ? Math.round(Number(match[1]) / 1024) : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * Per-ffmpeg memory ceiling for the watchdog. Leaves headroom for the Node
+   * process, SQLite, and the OS sharing the same cgroup. Returns 0 on large
+   * instances where no watchdog is needed.
+   */
+  public static ffmpegMemoryLimitMB(): number {
+    const budget = this.memoryBudgetMB();
+    if (budget >= 4096) return 0;
+    return Math.max(128, Math.min(Math.round(budget * 0.7), budget - 192));
+  }
+
+  /**
    * Conservative ffmpeg encoder thread budget for the current host. x264
    * frame buffers scale with thread count, so the default `-threads 0`
    * (every host core) OOM-kills small instances — Render free tier exposes

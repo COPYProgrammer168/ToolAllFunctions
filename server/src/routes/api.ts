@@ -238,9 +238,13 @@ apiRouter.get('/jobs/:id/events', (req, res) => {
     return res.status(404).json({ error: 'Job not found' });
   }
 
-  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
+  // Tell reverse proxies (Render/nginx) not to buffer the stream, otherwise
+  // progress events arrive in bursts or only when the connection closes.
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.socket?.setNoDelay(true);
   res.flushHeaders();
 
   JobManager.subscribe(id, res);
@@ -948,9 +952,11 @@ apiRouter.get('/media/jobs/:id/events', (req, res) => {
   const job = MediaJobManager.getJob(id);
   if (!job) return res.status(404).json({ error: 'Job not found.' });
 
-  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.socket?.setNoDelay(true);
   res.flushHeaders();
 
   MediaJobManager.subscribe(id, res);

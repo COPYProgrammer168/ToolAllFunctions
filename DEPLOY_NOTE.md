@@ -150,10 +150,15 @@ Guards now in place (all driven by `HardwareDetector.memoryBudgetMB()`):
 | --- | --- | --- |
 | Real memory budget | `HardwareDetector.memoryBudgetMB()` | Reads `/sys/fs/cgroup/memory.max` (v2) → `memory/memory.limit_in_bytes` (v1) → `MEMORY_LIMIT_MB` override → `os.totalmem()` fallback. `os.totalmem()` lies inside containers (reports host RAM). |
 | Encoder threads | `HardwareDetector.threadBudget()` | 512MB→1 thread, ≤1024→1, ≤2048→2, ≤4096→4, else 8. Previously `<1024→2`. |
+| Filter working size | `FFmpegService.executeFilterPipeline()` | Sources larger than the output canvas are downscaled **before** denoise/interpolation, so 4K→1080p jobs no longer allocate several full 4K frame pools. |
+| Filter threads | `FFmpegService.executeFilterPipeline()` | `-filter_threads 1 -filter_complex_threads 1` at ≤2GB; the default creates one frame pool per host core. |
+| FFmpeg RSS watchdog | `FFmpegService.runProcess()` | On Linux, samples `/proc/<pid>/status` every second and stops ffmpeg at ~70% of the budget (320MB on the free tier), adjusted for the current Node RSS, before the kernel OOM-kills the whole container. The job fails with `isMemory`, the server keeps serving. |
 | Motion interpolation | `OptimizationPlanner.plan()` | MCI allowed only when `budget ≥ 2GB` and `peak ≈ 1200MB per MP at 60fps ≤ 55% budget`. Otherwise downgraded to cheap `blend` with a warning surfaced to the UI. |
 | 4K | `OptimizationPlanner.plan()` | Target resolution capped: ≤2GB → 1080p, ≤4GB → 1440p. |
 | x264 frame pool | `FFmpegService.executeFilterPipeline()` | ≤1GB preset forced `veryfast`; ≤2GB binds `-x264-params rc-lookahead=10` (lookahead frames are full YUV pictures — up to ~300MB at 4K on slow presets). |
 | Optimizer queue | `JobManager.startJob()` | Serial promise chain — one optimization at a time; a second POST queues instead of spawning a parallel ffmpeg. |
+| SSE keepalive | `JobManager.subscribe()` / `MediaJobManager.subscribe()` | `retry: 2000` + 15s `: keepalive` comments, `X-Accel-Buffering: no`, and dead-listener cleanup. Reverse proxies no longer drop idle progress streams. |
+| Client reconnection | `client/src/App.tsx` | On SSE error, closes EventSource and polls `GET /api/jobs/:id` with exponential backoff for up to 2 minutes. 404 → actionable "server restarted, job lost"; 502/503/timeouts → keep waiting. |
 | Global handlers | `server.ts` | `unhandledRejection` / `uncaughtException` logged, process keeps serving (Node 22 default-crashes otherwise). |
 | Demo generator | `POST /api/video/demo` | Demo 4K60 ffmpeg run now shards threads via `threadBudget()`. |
 | explicit | `render.yaml` | `MEMORY_LIMIT_MB=512` set for the free plan (redundant with the cgroup read; deterministic). |

@@ -79,14 +79,17 @@ export class MediaJobManager {
         const jobListeners = this.listeners.get(jobId);
         jobListeners.add(res);
         let heartbeat;
-        // Send immediate state
+        // Tell EventSource how quickly to retry, then send immediate state.
+        res.write('retry: 2000\n\n');
         const job = this.jobs.get(jobId);
         if (job) {
             res.write(`data: ${JSON.stringify(job.progress)}\n\n`);
         }
         const cleanup = () => {
-            if (heartbeat)
+            if (heartbeat) {
                 clearInterval(heartbeat);
+                heartbeat = undefined;
+            }
             jobListeners.delete(res);
             if (jobListeners.size === 0) {
                 this.listeners.delete(jobId);
@@ -97,13 +100,19 @@ export class MediaJobManager {
         // idle timeouts, keeping streams open while a long job runs.
         heartbeat = setInterval(() => {
             try {
+                if (res.writableEnded || res.destroyed) {
+                    cleanup();
+                    return;
+                }
                 res.write(': keepalive\n\n');
             }
             catch {
                 cleanup();
             }
-        }, 25_000);
+        }, 15_000);
+        heartbeat.unref?.();
         res.on('close', cleanup);
+        res.on('error', cleanup);
         return cleanup;
     }
     static emitProgress(jobId, update) {

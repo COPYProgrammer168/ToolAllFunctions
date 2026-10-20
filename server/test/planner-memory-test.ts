@@ -104,6 +104,24 @@ function planFor(budget: number, meta: any, config: any) {
   );
 }
 
+{
+  (HardwareDetector as any).cachedMemoryBudgetMB = 512;
+  check(
+    '512MB: ffmpeg watchdog limit leaves room for Node (320MB)',
+    HardwareDetector.ffmpegMemoryLimitMB() === 320,
+    `got ${HardwareDetector.ffmpegMemoryLimitMB()}`
+  );
+}
+
+{
+  (HardwareDetector as any).cachedMemoryBudgetMB = 8192;
+  check(
+    '8GB: ffmpeg watchdog disabled',
+    HardwareDetector.ffmpegMemoryLimitMB() === 0,
+    `got ${HardwareDetector.ffmpegMemoryLimitMB()}`
+  );
+}
+
 if (failures > 0) {
   process.exit(1);
 }

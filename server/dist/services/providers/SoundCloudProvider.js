@@ -54,10 +54,11 @@ export class SoundCloudProvider {
         let thumbnail = '';
         let duration = 0;
         let directAudioUrl;
+        let hlsAudioUrl;
         let progressiveFormat;
         // Preferred strategy: parse the track page's embedded __sc_hydration payload,
         // which contains full sound metadata AND the transcoding table with the
-        // progressive (direct-file) stream URLs that SoundCloud signs.
+        // progressive (direct-file) stream URLs or HLS streams that SoundCloud signs.
         try {
             const pageRes = await fetch(url, {
                 headers: {
@@ -86,8 +87,6 @@ export class SoundCloudProvider {
                                 thumbnail = sound.artwork_url;
                             if (typeof sound.duration === 'number')
                                 duration = Math.round(sound.duration / 1000);
-                            // Only progressive (single-file) streams are directly downloadable.
-                            // HLS playlists would be downloaded as raw .m3u8 text and fail later.
                             const transcodings = sound.media?.transcodings || [];
                             const progressive = transcodings.find((t) => t.format?.protocol === 'progressive' && t.format?.mime_type?.includes('mpeg')) ||
                                 transcodings.find((t) => t.format?.protocol === 'progressive' &&
@@ -111,6 +110,38 @@ export class SoundCloudProvider {
                                 }
                                 catch {
                                     // Stream URL resolution failed; fall back to oEmbed metadata
+                                }
+                            }
+                            // Also resolve HLS transcoding (modern SoundCloud standard for audio).
+                            // Prefer the AAC variants: SoundCloud also exposes an ABR
+                            // `audio/mpegurl` master whose metadata endpoint can 404. Try the
+                            // remaining candidates as a fallback instead of giving up.
+                            const hlsCandidates = transcodings.filter((t) => t.format?.protocol === 'hls' && t.url);
+                            const preferredHls = hlsCandidates.filter((t) => /audio\/(mp4|aac)/i.test(t.format?.mime_type || ''));
+                            const orderedHls = [
+                                ...preferredHls,
+                                ...hlsCandidates.filter((t) => !preferredHls.includes(t)),
+                            ];
+                            if (!directAudioUrl && clientId) {
+                                for (const hls of orderedHls) {
+                                    try {
+                                        const hlsMetaUrl = new URL(hls.url);
+                                        hlsMetaUrl.searchParams.set('client_id', clientId);
+                                        const hlsRes = await fetch(hlsMetaUrl.toString(), {
+                                            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+                                            signal: AbortSignal.timeout(8000),
+                                        });
+                                        if (hlsRes.ok) {
+                                            const hlsJson = (await hlsRes.json());
+                                            if (hlsJson?.url) {
+                                                hlsAudioUrl = hlsJson.url;
+                                                const mime = hls.format?.mime_type || '';
+                                                progressiveFormat = mime.includes('mpeg') ? 'mp3' : mime.includes('mp4') ? 'm4a' : 'ogg';
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    catch { }
                                 }
                             }
                         }
@@ -137,7 +168,7 @@ export class SoundCloudProvider {
             // Page fetch failed — try oEmbed below
         }
         // Fetch track metadata via SoundCloud public oEmbed API (fallback)
-        if (title === 'SoundCloud Track' || /Unknown/.test(author) || !directAudioUrl) {
+        if (title === 'SoundCloud Track' || /Unknown/.test(author) || (!directAudioUrl && !hlsAudioUrl)) {
             try {
                 const oembedUrl = `https://soundcloud.com/oembed?format=json&url=${encodeURIComponent(url)}`;
                 const res = await fetch(oembedUrl, {
@@ -160,9 +191,50 @@ export class SoundCloudProvider {
                 // oEmbed failed
             }
         }
-        // If a direct progressive stream is available, the track exposes an
-        // authorized, publicly addressable file and downloading can proceed.
-        const downloadAuthorized = !!directAudioUrl;
+        // Last-resort fallback: probe with yt-dlp if both streams failed to resolve
+        if (!directAudioUrl && !hlsAudioUrl) {
+            try {
+                const { findYtDlpInvocation, YTDLP_UA } = await import('../../utils/ytDlp.js');
+                const invocation = await findYtDlpInvocation();
+                if (invocation) {
+                    const { execFile } = await import('node:child_process');
+                    const { promisify } = await import('node:util');
+                    const execFileAsync = promisify(execFile);
+                    const { stdout } = await execFileAsync(invocation.command, [
+                        ...invocation.prefixArgs,
+                        '--no-warnings',
+                        '--dump-single-json',
+                        '--no-playlist',
+                        '--user-agent',
+                        YTDLP_UA,
+                        url,
+                    ], { timeout: 30000, maxBuffer: 16 * 1024 * 1024 });
+                    const ytJson = JSON.parse(stdout.toString());
+                    if (ytJson) {
+                        if (ytJson.title && title === 'SoundCloud Track')
+                            title = ytJson.title;
+                        if (ytJson.uploader && author === 'Unknown Artist')
+                            author = ytJson.uploader;
+                        if (ytJson.thumbnail && !thumbnail)
+                            thumbnail = ytJson.thumbnail;
+                        if (ytJson.duration && !duration)
+                            duration = Math.round(ytJson.duration);
+                        if (ytJson.url) {
+                            if (ytJson.url.includes('.m3u8')) {
+                                hlsAudioUrl = ytJson.url;
+                            }
+                            else {
+                                directAudioUrl = ytJson.url;
+                            }
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+        // A track is authorized for download when a progressive stream, HLS audio stream,
+        // or yt-dlp is available.
+        const downloadAuthorized = !!directAudioUrl || !!hlsAudioUrl;
         // The media download route re-encodes through ffmpeg, so the advertised
         // output container only needs to be one the extractor supports.
         const nativeExt = progressiveFormat === 'mp3' ? 'mp3' : progressiveFormat === 'm4a' ? 'm4a' : 'mp3';
@@ -173,7 +245,10 @@ export class SoundCloudProvider {
                 format: nativeExt,
                 qualityLabel: `Original Stream (${(progressiveFormat || 'mp3').toUpperCase()})`,
                 directDownloadUrl: directAudioUrl,
-                notes: 'Progressive audio stream as served by SoundCloud (typically 128 kbps).',
+                hlsAudioUrl: hlsAudioUrl,
+                notes: directAudioUrl
+                    ? 'Progressive audio stream as served by SoundCloud (typically 128 kbps).'
+                    : 'HLS audio stream as served by SoundCloud.',
             },
             {
                 id: 'sc-mp3-320',
@@ -182,6 +257,7 @@ export class SoundCloudProvider {
                 qualityLabel: 'MP3 320 kbps (High Transcode)',
                 bitrateKbps: 320,
                 directDownloadUrl: directAudioUrl,
+                hlsAudioUrl: hlsAudioUrl,
                 notes: 'Notice: If the source audio stream is 128 kbps, 320 kbps transcode will not restore lost fidelity.',
             },
             {
@@ -191,6 +267,7 @@ export class SoundCloudProvider {
                 qualityLabel: 'FLAC Lossless',
                 isLossless: true,
                 directDownloadUrl: directAudioUrl,
+                hlsAudioUrl: hlsAudioUrl,
                 notes: 'FLAC encoding is generated from the available source stream; it cannot exceed source fidelity.',
             },
         ];
@@ -208,7 +285,8 @@ export class SoundCloudProvider {
                 : 'This track does not provide an authorized direct stream in its public metadata (private, region-locked, or removed).',
             copyrightNotice: 'SoundCloud streams are protected by artist copyright. Only download tracks you own or that the artist has made publicly accessible.',
             availableFormats: formats,
-            rawSourceUrl: directAudioUrl,
+            rawSourceUrl: directAudioUrl || hlsAudioUrl,
+            rawAudioUrl: directAudioUrl || hlsAudioUrl,
         };
     }
     async analyzeProfileTracks(url) {
