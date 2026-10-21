@@ -442,7 +442,7 @@ export const FontStudioView: React.FC = () => {
               type="search"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search styles by name…"
+              placeholder="Search styles or tags (discord, png)…"
               aria-label="Search styles"
               className="w-full bg-black/40 border border-white/10 rounded-xl pl-9 pr-3 py-2 text-xs text-neutral-100 placeholder:text-neutral-600 focus:outline-none focus:border-cyan-500/50"
             />
@@ -655,7 +655,8 @@ export const FontStudioView: React.FC = () => {
       {/* ── Licensing & honesty footer ── */}
       <p className="text-[10px] text-neutral-600 text-center max-w-2xl mx-auto leading-relaxed">
         Google preview fonts (Orbitron, Audiowide, UnifrakturMaguntia, Pirata One, Press Start 2P, Cinzel,
-        Share Tech Mono) are SIL OFL 1.1 licensed. Bundled display families (Astron Valley, Megatrox, Xylver,
+        Share Tech Mono, Bungee, Bungee Shade, Monoton, Black Ops One, Creepster, Metal Mania, Righteous,
+        Rubik Glitch) are SIL OFL 1.1 licensed. Bundled display families (Astron Valley, Megatrox, Xylver,
         The King, …) are personal-use/demo licensed — see <code className="text-neutral-500">src/assets/fonts/FONT-LICENSES.md</code>.
         “Copy” copies real Unicode-styled text that survives in Discord nicknames and every other plain-text
         surface; “Image” copies a rendered PNG of the font look you can paste anywhere; “PNG” downloads it as
@@ -681,7 +682,7 @@ interface FontStyleCardProps {
 
 const kindBadge = (kind: OutputKind) =>
   kind === 'unicode'
-    ? { label: 'Unicode · copyable', className: 'text-cyan-300 bg-cyan-500/10 border-cyan-500/30' }
+    ? { label: 'Unicode · Discord-ready', className: 'text-cyan-300 bg-cyan-500/10 border-cyan-500/30' }
     : { label: 'Unicode + font image', className: 'text-violet-300 bg-violet-500/10 border-violet-500/30' };
 
 /** Memoized: only cards whose inputs changed re-render when results update. */
@@ -756,6 +757,7 @@ const FontStyleCard: React.FC<FontStyleCardProps> = React.memo(
         <footer className="flex flex-wrap items-center gap-2 pt-1 border-t border-white/5">
           <button
             onClick={onCopy}
+            title="Copy as Unicode text — paste it into Discord, TikTok, Instagram or any plain-text field"
             className="flex-1 px-3 py-2 rounded-xl bg-white/10 hover:bg-white/20 border border-white/20 text-xs font-semibold text-neutral-100 transition-all flex items-center justify-center gap-2 min-w-[5.5rem]"
           >
             <Copy className="w-3.5 h-3.5" />

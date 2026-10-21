@@ -271,6 +271,13 @@ describe('TextTransformationRepository', () => {
     expect(repository.generate('Hi', {}, { search: 'zzz-no-such-style' })).toHaveLength(0);
   });
 
+  it('finds Discord-ready styles through search tags', () => {
+    // Every card copies real Unicode text, so "discord" finds all of them.
+    expect(repository.queryStyles({ search: 'discord' })).toHaveLength(FONT_STYLES.length);
+    const imageCards = FONT_STYLES.filter((s) => s.outputKind === 'font-preview').length;
+    expect(repository.queryStyles({ search: 'png' })).toHaveLength(imageCards);
+  });
+
   it('filters to favorites', () => {
     const ids = ['sci-bold', 'go-fraktur'];
     const results = repository.generate('Hi', {}, { favoriteIds: ids, favoritesOnly: true });
@@ -292,8 +299,11 @@ describe('TextTransformationRepository', () => {
     const input = 'Hi ខ្ញុំ 日本 🎉 Q';
     const unsupported = ['ខ', '្ញ', 'ុ', 'ំ', '日', '本', '🎉'];
     for (const result of repository.generate(input)) {
-      for (const ch of unsupported) {
-        expect(result.output).toContain(ch);
+      for (const glyph of unsupported) {
+        // Upside-down reverses the cluster order; every code point survives.
+        for (const ch of [...glyph]) {
+          expect(result.output).toContain(ch);
+        }
       }
     }
   });

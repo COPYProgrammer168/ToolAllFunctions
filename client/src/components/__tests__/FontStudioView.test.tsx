@@ -3,6 +3,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, within, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { FontStudioView } from '../FontStudioView';
+import { FONT_STYLES } from '../../services/fontStyleCatalog';
 
 /* PNG export is exercised separately (needs a real canvas); mock it here. */
 vi.mock('../../services/textPngExporter', () => ({
@@ -225,18 +226,22 @@ describe('FontStudioView', () => {
     render(<FontStudioView />);
     await typeText(user, 'Hi');
 
+    await user.type(screen.getByLabelText('Search styles'), 'Orbit Display');
     const fontCard = screen.getByText('Orbit Display').closest('article')!;
-    const unicodeCard = screen.getByText('Quantum Bold').closest('article')!;
 
     expect(within(fontCard).getByRole('button', { name: 'Copy Orbit Display as image' })).toBeTruthy();
     expect(within(fontCard).getByRole('button', { name: /transparent PNG/ })).toBeTruthy();
-    expect(within(unicodeCard).queryByRole('button', { name: /as image/ })).toBeNull();
-    expect(within(unicodeCard).queryByRole('button', { name: /transparent PNG/ })).toBeNull();
 
     // font cards copy real Unicode too (sans-bold here), never plain text
     await user.click(within(fontCard).getByRole('button', { name: 'Copy' }));
     expect(await readClipboard()).toBe('𝗛𝗶');
     expect(screen.getByRole('status').textContent).toContain('Discord nickname');
+
+    await user.clear(screen.getByLabelText('Search styles'));
+    await user.type(screen.getByLabelText('Search styles'), 'Quantum Bold');
+    const unicodeCard = screen.getByText('Quantum Bold').closest('article')!;
+    expect(within(unicodeCard).queryByRole('button', { name: /as image/ })).toBeNull();
+    expect(within(unicodeCard).queryByRole('button', { name: /transparent PNG/ })).toBeNull();
   });
 
   it('exports a transparent PNG for font previews', async () => {
@@ -244,6 +249,7 @@ describe('FontStudioView', () => {
     render(<FontStudioView />);
     await typeText(user, 'Hi');
 
+    await user.type(screen.getByLabelText('Search styles'), 'Orbit Display');
     await user.click(screen.getByRole('button', { name: 'Download Orbit Display as transparent PNG' }));
     expect(renderTextToPng).toHaveBeenCalledTimes(1);
     expect(downloadPng).toHaveBeenCalledTimes(1);
@@ -255,6 +261,7 @@ describe('FontStudioView', () => {
     render(<FontStudioView />);
     await typeText(user, 'Hi');
 
+    await user.type(screen.getByLabelText('Search styles'), 'Orbit Display');
     await user.click(screen.getByRole('button', { name: 'Copy Orbit Display as image' }));
     expect(renderTextToPng).toHaveBeenCalledTimes(1);
     // jsdom has no ClipboardItem — the fallback downloads the PNG
@@ -304,17 +311,22 @@ describe('FontStudioView', () => {
     render(<FontStudioView />);
     await typeText(user, 'Hi');
 
-    // 64 styles total — only the first page is rendered initially.
+    // Only the first page is rendered initially.
+    const total = FONT_STYLES.length;
     const grid = screen.getByLabelText('Generated styles');
-    expect(grid.querySelectorAll('article').length).toBe(24);
+    expect(grid.querySelectorAll('article').length).toBe(Math.min(24, total));
 
     await user.click(screen.getByRole('button', { name: /Show more styles/ }));
-    expect(grid.querySelectorAll('article').length).toBe(48);
+    expect(grid.querySelectorAll('article').length).toBe(Math.min(48, total));
     expect(screen.getByRole('button', { name: /Show more styles/ })).toBeTruthy();
 
     await user.click(screen.getByRole('button', { name: /Show more styles/ }));
-    expect(grid.querySelectorAll('article').length).toBe(64);
-    expect(screen.queryByRole('button', { name: /Show more styles/ })).toBeNull();
+    expect(grid.querySelectorAll('article').length).toBe(Math.min(72, total));
+    if (total <= 72) {
+      expect(screen.queryByRole('button', { name: /Show more styles/ })).toBeNull();
+    } else {
+      expect(screen.getByRole('button', { name: /Show more styles/ })).toBeTruthy();
+    }
   });
 
   it('offers the bundled sci-fi and gothic font previews', async () => {
@@ -347,7 +359,8 @@ describe('FontStudioView', () => {
 
     await typeText(user, 'A'.repeat(33));
     const overCard = screen.getByText('Quantum Bold').closest('article')!;
-    expect(within(overCard).getByText('33 / 32 nickname chars')).toBeTruthy();
+    // The live preview is debounced, so wait for the card to catch up.
+    expect(await within(overCard).findByText('33 / 32 nickname chars')).toBeTruthy();
     expect(within(overCard).getByText(/Over Discord's 32-character nickname limit/)).toBeTruthy();
   });
 

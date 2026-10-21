@@ -21,7 +21,7 @@ import type {
   StyleFilter,
   TransformOptions,
 } from './fontStyleTypes';
-import { DECORATIONS, SEPARATORS, type Decoration, type Separator } from './unicodeAlphabets';
+import { DECORATIONS, SEPARATORS, UPSIDE_DOWN, type Decoration, type Separator } from './unicodeAlphabets';
 
 export const MAX_CHARACTER_COUNT = 5000;
 
@@ -56,6 +56,56 @@ export function applyMapping(text: string, alphabet: Map<string, string>): strin
     out += alphabet.get(ch) ?? ch;
   }
   return out;
+}
+
+let graphemeSegmenter: Intl.Segmenter | null | undefined;
+
+function getGraphemeSegmenter(): Intl.Segmenter | null {
+  if (graphemeSegmenter === undefined) {
+    graphemeSegmenter =
+      typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function'
+        ? new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+        : null;
+  }
+  return graphemeSegmenter;
+}
+
+/**
+ * Split text into user-perceived characters (grapheme clusters), so emoji
+ * sequences, flags and combining accents stay together when reversed.
+ * Uses Intl.Segmenter where available with a combining-mark fallback.
+ */
+export function splitGraphemes(text: string): string[] {
+  const segmenter = getGraphemeSegmenter();
+  if (segmenter) {
+    return [...segmenter.segment(text)].map((part) => part.segment);
+  }
+  const parts: string[] = [];
+  for (const ch of text) {
+    if (parts.length && isCombiningMark(ch.codePointAt(0)!)) {
+      parts[parts.length - 1] += ch;
+    } else {
+      parts.push(ch);
+    }
+  }
+  return parts;
+}
+
+/** Reverse text by grapheme cluster, never splitting emoji or accents. */
+export function reverseGraphemes(text: string): string {
+  return splitGraphemes(text).reverse().join('');
+}
+
+/**
+ * Upside-down text: map every character to its rotated Unicode lookalike,
+ * then reverse each line. Line breaks stay in place so multi-line text
+ * keeps its layout. Unsupported characters pass through unchanged.
+ */
+export function flipText(text: string): string {
+  return text
+    .split('\n')
+    .map((line) => reverseGraphemes(applyMapping(line, UPSIDE_DOWN)))
+    .join('\n');
 }
 
 /** Append a combining mark after every base character (glitch styles).
@@ -232,7 +282,13 @@ export class TextTransformationRepository {
       if (category !== 'all' && style.category !== category) return false;
       if (favoritesOnly && !favoriteIds.includes(style.id)) return false;
       if (needle) {
-        const haystack = `${style.name} ${style.description} ${style.category}`.toLowerCase();
+        // Keyword tags make discovery easy: "discord" finds every copyable
+        // style, "png" finds the cards that also export a font image.
+        const tags =
+          style.outputKind === 'font-preview'
+            ? 'unicode copy copyable discord discord-ready font image png'
+            : 'unicode copy copyable discord discord-ready';
+        const haystack = `${style.name} ${style.description} ${style.category} ${tags}`.toLowerCase();
         if (!haystack.includes(needle)) return false;
       }
       return true;

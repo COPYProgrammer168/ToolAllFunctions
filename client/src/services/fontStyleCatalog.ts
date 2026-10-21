@@ -62,6 +62,14 @@ const FONT_PIRATA = "'Pirata One', 'UnifrakturMaguntia', serif";
 const FONT_PRESS_START = "'Press Start 2P', monospace";
 const FONT_CINZEL = "'Cinzel', serif";
 const FONT_SHARE_TECH = "'Share Tech Mono', 'JetBrains Mono', monospace";
+const FONT_BUNGEE = "'Bungee', 'Arial Black', sans-serif";
+const FONT_BUNGEE_SHADE = "'Bungee Shade', 'Bungee', sans-serif";
+const FONT_MONOTON = "'Monoton', 'Orbitron', sans-serif";
+const FONT_BLACK_OPS = "'Black Ops One', 'Rajdhani', sans-serif";
+const FONT_CREEPSTER = "'Creepster', 'Pirata One', cursive";
+const FONT_METAL_MANIA = "'Metal Mania', 'UnifrakturMaguntia', cursive";
+const FONT_RIGHTEOUS = "'Righteous', 'Orbitron', sans-serif";
+const FONT_RUBIK_GLITCH = "'Rubik Glitch', 'Share Tech Mono', monospace";
 
 /**
  * Bundled display fonts (personal-use/demo licensed — see
@@ -162,14 +170,99 @@ const LOCAL_FONTS: FontStyleDefinition[] = [
   localFont('go-gorez', 'Gorez Metal', 'gothic', 'Gorez', 'Spiked metal blackletter for album and game art.', 88, 'bold-fraktur'),
 ];
 
+/**
+ * Real Google display families (SIL OFL 1.1 — see index.html) used for the
+ * Image/PNG export. Copy still gives the closest Unicode nickname style,
+ * so the text stays pasteable in Discord and every other plain-text surface.
+ */
+const webFont = (
+  id: string,
+  name: string,
+  category: FontStyleCategoryId,
+  fontFamily: string,
+  description: string,
+  popularity: number,
+  styleId: UnicodeStyleId
+): FontStyleDefinition => {
+  const style = NICKNAME_STYLE_BY_ID.get(styleId);
+  if (!style) throw new Error(`unknown nickname style: ${styleId}`);
+  return {
+    id,
+    name,
+    category,
+    description,
+    popularity,
+    outputKind: 'font-preview',
+    fontFamily,
+    defaultStyleId: styleId,
+    transform: style.transform,
+  };
+};
+
+const WEB_FONTS: FontStyleDefinition[] = [
+  /* ── Google display faces (SIL OFL 1.1) ── */
+  webFont('gm-bungee', 'Bungee Block', 'gaming', FONT_BUNGEE, 'Chunky arcade signage — copy as bold sans Unicode; Image/PNG keep the font.', 88, 'sans-bold'),
+  webFont('dc-bungee-shade', 'Bungee Shade', 'decorative', FONT_BUNGEE_SHADE, 'Layered shadow display — copy as bold sans Unicode; Image/PNG keep the font.', 84, 'sans-bold'),
+  webFont('cp-monoton', 'Monoton Neon', 'cyberpunk', FONT_MONOTON, 'Thin neon tube lettering — copy as sans Unicode; Image/PNG keep the font.', 86, 'sans'),
+  webFont('gm-black-ops', 'Black Ops', 'gaming', FONT_BLACK_OPS, 'Stencilled military display — copy as bold sans Unicode; Image/PNG keep the font.', 89, 'sans-bold'),
+  webFont('df-creepster', 'Creepster', 'dark-fantasy', FONT_CREEPSTER, 'Horror-poster lettering — copy as bold Fraktur Unicode; Image/PNG keep the font.', 85, 'bold-fraktur'),
+  webFont('go-metal-mania', 'Metal Mania', 'gothic', FONT_METAL_MANIA, 'Spiked metal band logo — copy as bold Fraktur Unicode; Image/PNG keep the font.', 87, 'bold-fraktur'),
+  webFont('sf-righteous', 'Righteous', 'scifi', FONT_RIGHTEOUS, 'Retro-future poster sans — copy as sans Unicode; Image/PNG keep the font.', 83, 'sans'),
+  webFont('cp-rubik-glitch', 'Rubik Glitch', 'cyberpunk', FONT_RUBIK_GLITCH, 'Broken-signal glitch face — copy as bold italic Unicode; Image/PNG keep the font.', 87, 'sans-bold-italic'),
+];
+
 /** Frame text with flanking ornaments; empty/whitespace text stays empty. */
 const framed =
   (left: string, right: string, inner: (t: string) => string = (t) => t) =>
   (t: string): string =>
     t.trim() ? `${left} ${inner(t)} ${right}` : '';
 
+/** A card that copies the exact Unicode output of a nickname style. */
+const unicodeCard = (
+  id: string,
+  name: string,
+  category: FontStyleCategoryId,
+  description: string,
+  popularity: number,
+  styleId: UnicodeStyleId
+): FontStyleDefinition => {
+  const style = NICKNAME_STYLE_BY_ID.get(styleId);
+  if (!style) throw new Error(`unknown nickname style: ${styleId}`);
+  return {
+    id,
+    name,
+    category,
+    description,
+    popularity,
+    outputKind: 'unicode',
+    defaultStyleId: styleId,
+    transform: style.transform,
+  };
+};
+
+/** Extra copy-first styles — every one is plain Unicode, so it survives a
+ *  Discord nickname, chat message or bio without the font installed. */
+const EXTRA_UNICODE_CARDS: FontStyleDefinition[] = [
+  unicodeCard('cp-upside', 'Upside Down', 'cyberpunk', 'Rotated characters in reverse order — flip any text upside down.', 91, 'upside-down'),
+  unicodeCard('cp-braille', 'Braille Code', 'cyberpunk', 'Braille-pattern letters and digits — dotted cipher text for the grid.', 84, 'braille'),
+  unicodeCard('cp-slashed', 'Slash Redacted', 'cyberpunk', 'A diagonal slash through every character — classified terminal feed.', 82, 'slashed'),
+  unicodeCard('gm-regional', 'Regional Tag', 'gaming', 'Regional-indicator letters — flag-alphabet esports badges.', 86, 'regional'),
+  unicodeCard('gm-cyrillic', 'Cyrillic Squad', 'gaming', 'Faux-Cyrillic lettering built from real Cyrillic characters.', 88, 'cyrillic'),
+  unicodeCard('gm-strikeout', 'Strikeout', 'gaming', 'Heavy struck-through lettering for loss screens and KOs.', 85, 'strikethrough'),
+  unicodeCard('gm-negative-circled', 'Black Bubble', 'gaming', 'Solid circled badges — loud, heavy social tags. Lowercase stays plain.', 84, 'negative-circled'),
+  unicodeCard('sf-squared', 'Crate Stencil', 'scifi', 'Squared capitals — blocky cargo-stencil tags. Lowercase stays plain.', 79, 'squared'),
+  unicodeCard('mn-underline', 'Underline', 'minimal', 'A single clean underline beneath every character.', 83, 'underline'),
+  unicodeCard('mn-double-underline', 'Double Rule', 'minimal', 'Two underlines for double emphasis.', 79, 'double-underline'),
+  unicodeCard('mn-overline', 'Overline', 'minimal', 'A fine line above every character — architectural labels.', 77, 'overline'),
+  unicodeCard('mn-parenthesized', 'Parenthesized', 'minimal', 'Parenthesized letters and digits — airy, understated captions.', 76, 'parenthesized'),
+  unicodeCard('sp-subscript', 'Subscript', 'space', 'Low-slung subscript letters and digits — orbital telemetry captions.', 80, 'subscript'),
+  unicodeCard('dc-wavy', 'Wavy Underline', 'decorative', 'A waving underline beneath every character.', 78, 'wavy-underline'),
+];
+
 export const FONT_STYLES: FontStyleDefinition[] = [
   ...LOCAL_FONTS,
+  ...WEB_FONTS,
+  ...EXTRA_UNICODE_CARDS,
   /* ── Sci-Fi & Futuristic ─────────────────────────────────────────────── */
   {
     id: 'sci-bold',
@@ -367,6 +460,7 @@ export const FONT_STYLES: FontStyleDefinition[] = [
     description: 'Superscript letters where Unicode defines them (q and capitals stay plain).',
     popularity: 70,
     outputKind: 'unicode',
+    defaultStyleId: 'superscript',
     transform: (t) => applyMapping(t, SUPERSCRIPT),
   },
   {

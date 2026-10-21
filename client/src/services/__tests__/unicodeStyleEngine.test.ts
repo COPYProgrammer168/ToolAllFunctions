@@ -13,7 +13,7 @@ const style = (id: UnicodeStyleId) => {
 };
 
 describe('unicodeStyleEngine module', () => {
-  it('offers the 20 styles in a stable dropdown order', () => {
+  it('offers the 32 styles in a stable dropdown order', () => {
     expect(UNICODE_STYLES.map((s) => s.id)).toEqual([
       'bold-serif',
       'italic-serif',
@@ -35,8 +35,20 @@ describe('unicodeStyleEngine module', () => {
       'negative-squared',
       'small-caps',
       'parenthesized',
+      'superscript',
+      'subscript',
+      'strikethrough',
+      'underline',
+      'double-underline',
+      'overline',
+      'slashed',
+      'wavy-underline',
+      'upside-down',
+      'braille',
+      'regional',
+      'cyrillic',
     ]);
-    expect(new Set(UNICODE_STYLES.map((s) => s.id)).size).toBe(20);
+    expect(new Set(UNICODE_STYLES.map((s) => s.id)).size).toBe(32);
   });
 
   it('every style really styles plain ASCII text', () => {
@@ -65,6 +77,19 @@ describe('unicodeStyleEngine module', () => {
     expect(applyUnicodeStyle('ABC', 'squared')).toBe('🄰🄱🄲');
     expect(applyUnicodeStyle('ABC', 'negative-squared')).toBe('🅰🅱🅲');
     expect(applyUnicodeStyle('abc', 'parenthesized')).toBe('⒜⒝⒞');
+    expect(applyUnicodeStyle('ab', 'superscript')).toBe('ᵃᵇ');
+    expect(applyUnicodeStyle('ab', 'subscript')).toBe('ₐb');
+    expect(applyUnicodeStyle('AE', 'subscript')).toBe('ₐₑ');
+    expect(applyUnicodeStyle('ab', 'strikethrough')).toBe('a\u0336b\u0336');
+    expect(applyUnicodeStyle('ab', 'underline')).toBe('a\u0332b\u0332');
+    expect(applyUnicodeStyle('ab', 'double-underline')).toBe('a\u0333b\u0333');
+    expect(applyUnicodeStyle('ab', 'overline')).toBe('a\u0305b\u0305');
+    expect(applyUnicodeStyle('ab', 'slashed')).toBe('a\u0338b\u0338');
+    expect(applyUnicodeStyle('ab', 'wavy-underline')).toBe('a\u0330b\u0330');
+    expect(applyUnicodeStyle('abc', 'upside-down')).toBe('ɔqɐ');
+    expect(applyUnicodeStyle('abc', 'braille')).toBe('⠁⠃⠉');
+    expect(applyUnicodeStyle('ab', 'regional')).toBe('🇦🇧');
+    expect(applyUnicodeStyle('AB', 'cyrillic')).toBe('\u0410\u0412');
   });
 
   it('maps digits for styles that define digit glyphs', () => {
@@ -93,21 +118,47 @@ describe('unicodeStyleEngine module', () => {
 
   it('passes spaces, brackets, symbols, emoji, Khmer and CJK through unchanged', () => {
     const pass = ' []() 🎉 ខ្ញុំ 日本';
+    // Combining-mark styles decorate every base character (including
+    // punctuation); upside-down reorders by design. All other styles keep
+    // the original sequence exactly.
+    const decorated = new Set(['strikethrough', 'underline', 'double-underline', 'overline', 'slashed', 'wavy-underline']);
     for (const s of UNICODE_STYLES) {
+      if (s.id === 'upside-down' || decorated.has(s.id)) continue;
       const out = applyUnicodeStyle(pass, s.id);
       expect(out, s.id).toContain(' []() ');
       expect(out, s.id).toContain('🎉');
       expect(out, s.id).toContain('ខ្ញុំ');
       expect(out, s.id).toContain('日本');
     }
+    for (const id of decorated) {
+      const out = applyUnicodeStyle(' a b ', id as UnicodeStyleId);
+      expect(out).toContain(' ');
+      // Spaces are never decorated, so no combining mark may follow one.
+      expect(/\s\p{M}/u.test(out), id).toBe(false);
+    }
+    const flipped = applyUnicodeStyle(pass, 'upside-down');
+    for (const ch of [' ', '[', ']', '(', ')', '🎉']) {
+      expect(flipped).toContain(ch);
+    }
+    // Flipping reverses whole clusters; each code point still survives.
+    for (const ch of [...'ខ្ញុំ日本']) expect(flipped).toContain(ch);
   });
 
   it('never splits supplementary-plane characters', () => {
     for (const s of UNICODE_STYLES) {
       const out = applyUnicodeStyle('🎉😀', s.id);
-      expect(out, s.id).toBe('🎉😀');
-      expect([...out].length, s.id).toBe(2);
+      // Base code points stay whole; combining-mark styles add marks after them.
+      const bases = [...out].filter((ch) => !/\p{M}/u.test(ch));
+      expect(bases.length, s.id).toBe(2);
+      expect(out, s.id).toContain('🎉');
+      expect(out, s.id).toContain('😀');
+      if (s.id !== 'upside-down') {
+        // Removing any combining decorations must leave the emoji untouched.
+        expect(out.replace(/\p{M}/gu, ''), s.id).toBe('🎉😀');
+      }
     }
+    // Flip text reverses the grapheme order, but each emoji stays whole.
+    expect(applyUnicodeStyle('🎉😀', 'upside-down')).toBe('😀🎉');
   });
 
   it('keeps combining marks attached', () => {

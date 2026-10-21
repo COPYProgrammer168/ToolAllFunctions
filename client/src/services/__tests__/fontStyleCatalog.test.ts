@@ -59,7 +59,8 @@ describe('style catalog integrity', () => {
 
   it('exposes the engine nickname styles as the card dropdown source', () => {
     expect([...NICKNAME_STYLES].map((s) => s.id)).toEqual([...UNICODE_STYLES].map((s) => s.id));
-    expect(NICKNAME_STYLES.length).toBe(20);
+    expect(NICKNAME_STYLES.length).toBe(UNICODE_STYLES.length);
+    expect(NICKNAME_STYLES.length).toBeGreaterThanOrEqual(30);
   });
 
   it('every defaultStyleId references a known Unicode nickname style', () => {
@@ -76,6 +77,51 @@ describe('style catalog integrity', () => {
       if (style.fontFamily) {
         expect(style.defaultStyleId, style.id).toBeTruthy();
       }
+    }
+  });
+
+  it('offers the expanded Discord-ready copy cards', () => {
+    const ids = [
+      'cp-upside',
+      'cp-braille',
+      'cp-slashed',
+      'gm-regional',
+      'gm-cyrillic',
+      'gm-strikeout',
+      'gm-negative-circled',
+      'sf-squared',
+      'mn-underline',
+      'mn-double-underline',
+      'mn-overline',
+      'mn-parenthesized',
+      'sp-subscript',
+      'dc-wavy',
+    ];
+    for (const id of ids) {
+      const style = FONT_STYLES.find((s) => s.id === id);
+      expect(style, id).toBeDefined();
+      expect(style!.outputKind, id).toBe('unicode');
+      expect(style!.defaultStyleId, id).toBeTruthy();
+      expect(engine.transform('Hello', style!), id).not.toBe('Hello');
+    }
+  });
+
+  it('offers the new display webfonts for image export', () => {
+    const ids = [
+      'gm-bungee',
+      'dc-bungee-shade',
+      'cp-monoton',
+      'gm-black-ops',
+      'df-creepster',
+      'go-metal-mania',
+      'sf-righteous',
+      'cp-rubik-glitch',
+    ];
+    for (const id of ids) {
+      const style = FONT_STYLES.find((s) => s.id === id);
+      expect(style, id).toBeDefined();
+      expect(style!.outputKind, id).toBe('font-preview');
+      expect(style!.fontFamily, id).toBeTruthy();
     }
   });
 });
@@ -122,8 +168,12 @@ describe('every transformation mapping', () => {
     const mustPreserve = ['ខ', '្ញ', 'ុ', 'ំ', '日', '本', 'こ', 'ん', 'に', 'ち', 'は', '🎉', '😀', '𐍈', '\u0301'];
     for (const style of FONT_STYLES) {
       const out = engine.transform(TORTURE, style);
-      for (const ch of mustPreserve) {
-        expect(out, `style ${style.id} must preserve ${ch.codePointAt(0)?.toString(16)}`).toContain(ch);
+      for (const glyph of mustPreserve) {
+        // Order-changing styles (upside-down) reverse clusters, so check
+        // each code point is preserved rather than the contiguous sequence.
+        for (const ch of [...glyph]) {
+          expect(out, `style ${style.id} must preserve ${ch.codePointAt(0)?.toString(16)}`).toContain(ch);
+        }
       }
     }
   });

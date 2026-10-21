@@ -175,6 +175,13 @@ export const PARENTHESIZED = buildAlphabet({
   extras: enclosedDigits(0x2474),
 });
 
+/** Regional-indicator letters 🇦-🇿 (U+1F1E6) — flag-alphabet badges.
+ *  Lowercase maps to the same uppercase indicators (Unicode has one case). */
+export const REGIONAL_INDICATORS = buildAlphabet({
+  upperStart: 0x1f1e6,
+  lowerStart: 0x1f1e6,
+});
+
 /* ── Partial alphabets (real gaps preserved unchanged by the engine) ──────── */
 
 /** Superscript letters — 'q' and all capitals have no superscript form. */
@@ -185,6 +192,89 @@ export const SUPERSCRIPT = new Map<string, string>([
   ['p', '\u1d56'], ['r', '\u02b3'], ['s', '\u02e2'], ['t', '\u1d57'], ['u', '\u1d58'],
   ['v', '\u1d5b'], ['w', '\u02b7'], ['x', '\u02e3'], ['y', '\u02b8'], ['z', '\u1dbb'],
   ...buildSuperscriptDigits(),
+]);
+
+/**
+ * Subscript letters — only the letters Unicode actually defines a subscript
+ * glyph for. b, c, d, f, g, q, w, y and z have no subscript form and stay
+ * unchanged. Capitals map to the same lowercase subscript glyph.
+ */
+const SUBSCRIPT_LOWER = new Map<string, string>([
+  ['a', '\u2090'], ['e', '\u2091'], ['h', '\u2095'], ['i', '\u1d62'], ['j', '\u2c7c'],
+  ['k', '\u2096'], ['l', '\u2097'], ['m', '\u2098'], ['n', '\u2099'], ['o', '\u2092'],
+  ['p', '\u209a'], ['r', '\u1d63'], ['s', '\u209b'], ['t', '\u209c'], ['u', '\u1d64'],
+  ['v', '\u1d65'], ['x', '\u2093'],
+  ...DIGITS.split('').map((ch, i) => [ch, String.fromCodePoint(0x2080 + i)] as [string, string]),
+]);
+
+export const SUBSCRIPT = new Map<string, string>(SUBSCRIPT_LOWER);
+for (const [from, to] of SUBSCRIPT_LOWER) {
+  if (from >= 'a' && from <= 'z') SUBSCRIPT.set(from.toUpperCase(), to);
+}
+
+/** Braille letters and digits using the real Braille Patterns block (U+2800). */
+const BRAILLE_DOTS: Record<string, string> = {
+  a: '1', b: '12', c: '14', d: '145', e: '15', f: '124', g: '1245', h: '125',
+  i: '24', j: '245', k: '13', l: '123', m: '134', n: '1345', o: '135',
+  p: '1234', q: '12345', r: '1235', s: '234', t: '2345', u: '136',
+  v: '1236', w: '2456', x: '1346', y: '13456', z: '1356',
+};
+
+function toBraillePattern(dots: string): string {
+  let mask = 0;
+  for (const dot of dots) mask |= 1 << (Number(dot) - 1);
+  return String.fromCodePoint(0x2800 + mask);
+}
+
+function buildBrailleAlphabet(): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const [letter, dots] of Object.entries(BRAILLE_DOTS)) {
+    const pattern = toBraillePattern(dots);
+    map.set(letter, pattern);
+    map.set(letter.toUpperCase(), pattern);
+  }
+  // Digits share the a-j patterns in Braille: 1 → a … 9 → i, 0 → j.
+  DIGITS.split('').forEach((digit, i) => {
+    const letter = i === 0 ? 'j' : 'abcdefghi'[i - 1];
+    map.set(digit, toBraillePattern(BRAILLE_DOTS[letter]));
+  });
+  return map;
+}
+
+export const BRAILLE = buildBrailleAlphabet();
+
+/**
+ * Faux-Cyrillic lookalike/transliteration map built from real Cyrillic
+ * letters (U+0400 block). Every target exists in the Unicode Standard.
+ */
+export const CYRILLIC_LOOK = new Map<string, string>([
+  ['A', '\u0410'], ['B', '\u0412'], ['C', '\u0421'], ['D', '\u0414'], ['E', '\u0415'],
+  ['F', '\u0424'], ['G', '\u0413'], ['H', '\u041d'], ['I', '\u0418'], ['J', '\u0408'],
+  ['K', '\u041a'], ['L', '\u041b'], ['M', '\u041c'], ['N', '\u0418'], ['O', '\u041e'],
+  ['P', '\u0420'], ['Q', '\u0424'], ['R', '\u042f'], ['S', '\u0421'], ['T', '\u0422'],
+  ['U', '\u0426'], ['V', '\u0412'], ['W', '\u0428'], ['X', '\u0425'], ['Y', '\u0423'],
+  ['Z', '\u0417'],
+  ['a', '\u0430'], ['b', '\u0431'], ['c', '\u0441'], ['d', '\u0434'], ['e', '\u0435'],
+  ['f', '\u0444'], ['g', '\u0433'], ['h', '\u043d'], ['i', '\u0438'], ['j', '\u0458'],
+  ['k', '\u043a'], ['l', '\u043b'], ['m', '\u043c'], ['n', '\u0438'], ['o', '\u043e'],
+  ['p', '\u0440'], ['q', '\u0444'], ['r', '\u044f'], ['s', '\u0441'], ['t', '\u0442'],
+  ['u', '\u0446'], ['v', '\u0432'], ['w', '\u0448'], ['x', '\u0445'], ['y', '\u0443'],
+  ['z', '\u0437'],
+]);
+
+/** Upside-down letters: a-z mapped to their rotated lookalikes. Upper and
+ *  lower case share the rotated lowercase glyph (Unicode has no rotated
+ *  uppercase alphabet), which is exactly how flip-text generators read. */
+const FLIPPED_LOWER = ['ɐ', 'q', 'ɔ', 'p', 'ǝ', 'ɟ', 'ƃ', 'ɥ', 'ᴉ', 'ɾ', 'ʞ', 'l', 'ɯ', 'u', 'o', 'd', 'b', 'ɹ', 's', 'ʇ', 'n', 'ʌ', 'ʍ', 'x', 'ʎ', 'z'];
+const FLIPPED_DIGITS = ['0', 'Ɩ', 'ᄅ', 'Ɛ', 'ㄣ', 'ϛ', '9', 'ㄥ', '8', '6'];
+
+export const UPSIDE_DOWN = new Map<string, string>([
+  ...LOWERCASE.split('').map((ch, i) => [ch, FLIPPED_LOWER[i]] as [string, string]),
+  ...UPPERCASE.split('').map((ch, i) => [ch, FLIPPED_LOWER[i]] as [string, string]),
+  ...DIGITS.split('').map((ch, i) => [ch, FLIPPED_DIGITS[i]] as [string, string]),
+  ['.', '˙'], [',', "'"], ["'", ','], ['"', '„'], ['!', '¡'], ['?', '¿'],
+  ['(', ')'], [')', '('], ['[', ']'], [']', '['], ['{', '}'], ['}', '{'],
+  ['<', '>'], ['>', '<'], ['&', '⅋'], ['_', '‾'], [';', '؛'],
 ]);
 
 /**
@@ -223,6 +313,15 @@ export const DECORATIONS: Decoration[] = [
   { id: 'gamer', name: 'Gamer ▛ ▟', prefix: '▛ ', suffix: ' ▟' },
   { id: 'wave', name: 'Wave 〜〜 〜〜', prefix: '〜〜 ', suffix: ' 〜〜' },
   { id: 'double-line', name: 'Double ═══ ═══', prefix: '═══ ', suffix: ' ═══' },
+  { id: 'sparkles', name: 'Sparkles ✨ ✨', prefix: '✨ ', suffix: ' ✨' },
+  { id: 'stars', name: 'Stars ★ ★', prefix: '★ ', suffix: ' ★' },
+  { id: 'hearts', name: 'Hearts ♡ ♡', prefix: '♡ ', suffix: ' ♡' },
+  { id: 'crown', name: 'Crown ♛ ♛', prefix: '♛ ', suffix: ' ♛' },
+  { id: 'flame', name: 'Flame 🔥 🔥', prefix: '🔥 ', suffix: ' 🔥' },
+  { id: 'music', name: 'Music ♪ ♪', prefix: '♪ ', suffix: ' ♪' },
+  { id: 'skull', name: 'Skull ☠ ☠', prefix: '☠ ', suffix: ' ☠' },
+  { id: 'swords', name: 'Swords ⚔ ⚔', prefix: '⚔ ', suffix: ' ⚔' },
+  { id: 'diamonds', name: 'Diamonds ◆ ◆', prefix: '◆ ', suffix: ' ◆' },
 ];
 
 export interface Separator {
@@ -238,6 +337,13 @@ export const SEPARATORS: Separator[] = [
   { id: 'slash', name: 'Slash /', char: '/' },
   { id: 'star', name: 'Star ✦', char: '✦' },
   { id: 'diaeresis', name: 'Diaeresis ¨', char: '¨' },
+  { id: 'heart', name: 'Heart ♥', char: '♥' },
+  { id: 'sparkle', name: 'Sparkle ✧', char: '✧' },
+  { id: 'dash', name: 'Dash -', char: '-' },
+  { id: 'underscore', name: 'Underscore _', char: '_' },
+  { id: 'tilde', name: 'Tilde ~', char: '~' },
+  { id: 'dot', name: 'Dot .', char: '.' },
+  { id: 'cross', name: 'Cross ✚', char: '✚' },
 ];
 
 /* ── Mapping helpers ─────────────────────────────────────────────────────── */

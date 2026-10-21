@@ -23,9 +23,11 @@
  */
 
 import type { FontStyleDefinition } from './fontStyleTypes';
-import { applyMapping } from './fontStyleEngine';
+import { addCombiningMark, applyMapping, flipText } from './fontStyleEngine';
 import {
+  BRAILLE,
   CIRCLED,
+  CYRILLIC_LOOK,
   FULLWIDTH,
   MATH_BOLD,
   MATH_BOLD_ITALIC,
@@ -43,11 +45,14 @@ import {
   NEGATIVE_CIRCLED,
   NEGATIVE_SQUARED,
   PARENTHESIZED,
+  REGIONAL_INDICATORS,
   SMALL_CAPITALS,
   SQUARED,
+  SUBSCRIPT,
+  SUPERSCRIPT,
 } from './unicodeAlphabets';
 
-/** The 20 Unicode styles offered by the engine. */
+/** The 32 Unicode styles offered by the engine. */
 export type UnicodeStyleId =
   | 'bold-serif'
   | 'italic-serif'
@@ -68,7 +73,19 @@ export type UnicodeStyleId =
   | 'squared'
   | 'negative-squared'
   | 'small-caps'
-  | 'parenthesized';
+  | 'parenthesized'
+  | 'superscript'
+  | 'subscript'
+  | 'strikethrough'
+  | 'underline'
+  | 'double-underline'
+  | 'overline'
+  | 'slashed'
+  | 'wavy-underline'
+  | 'upside-down'
+  | 'braille'
+  | 'regional'
+  | 'cyrillic';
 
 /** A Unicode style: a plain engine definition with a fixed style id. */
 export interface UnicodeStyle extends FontStyleDefinition {
@@ -97,6 +114,18 @@ export const UNICODE_STYLES: readonly UnicodeStyle[] = [
   { id: 'negative-squared', name: 'Negative Squared', category: 'gaming', description: 'Solid squared capitals — cargo-crate weight. Lowercase stays plain.', popularity: 74, outputKind: 'unicode', transform: (t) => applyMapping(t, NEGATIVE_SQUARED) },
   { id: 'small-caps', name: 'Small Caps', category: 'dark-fantasy', description: 'Small-capital letters where Unicode provides them.', popularity: 80, outputKind: 'unicode', transform: (t) => applyMapping(t, SMALL_CAPITALS) },
   { id: 'parenthesized', name: 'Parenthesized', category: 'minimal', description: 'Parenthesized letters and digits — airy, understated.', popularity: 72, outputKind: 'unicode', transform: (t) => applyMapping(t, PARENTHESIZED) },
+  { id: 'superscript', name: 'Superscript', category: 'dark-fantasy', description: 'Tiny raised letters and digits. Letters without a Unicode form stay plain.', popularity: 78, outputKind: 'unicode', transform: (t) => applyMapping(t, SUPERSCRIPT) },
+  { id: 'subscript', name: 'Subscript', category: 'space', description: 'Low-slung subscript letters and digits. Letters without a Unicode form stay plain.', popularity: 74, outputKind: 'unicode', transform: (t) => applyMapping(t, SUBSCRIPT) },
+  { id: 'strikethrough', name: 'Strikethrough', category: 'minimal', description: 'Each character struck through with a combining overlay.', popularity: 81, outputKind: 'unicode', transform: (t) => addCombiningMark(t, '\u0336') },
+  { id: 'underline', name: 'Underline', category: 'minimal', description: 'A single underline drawn beneath every character.', popularity: 79, outputKind: 'unicode', transform: (t) => addCombiningMark(t, '\u0332') },
+  { id: 'double-underline', name: 'Double Underline', category: 'minimal', description: 'Two underlines for heavy emphasis.', popularity: 75, outputKind: 'unicode', transform: (t) => addCombiningMark(t, '\u0333') },
+  { id: 'overline', name: 'Overline', category: 'minimal', description: 'A line drawn above every character.', popularity: 73, outputKind: 'unicode', transform: (t) => addCombiningMark(t, '\u0305') },
+  { id: 'slashed', name: 'Slashed', category: 'cyberpunk', description: 'A diagonal slash through every character — redacted terminal style.', popularity: 77, outputKind: 'unicode', transform: (t) => addCombiningMark(t, '\u0338') },
+  { id: 'wavy-underline', name: 'Wavy Underline', category: 'decorative', description: 'A wavy underline beneath every character.', popularity: 74, outputKind: 'unicode', transform: (t) => addCombiningMark(t, '\u0330') },
+  { id: 'upside-down', name: 'Upside Down', category: 'cyberpunk', description: 'Rotated Unicode lookalikes in reverse order — flip your text upside down.', popularity: 86, outputKind: 'unicode', transform: flipText },
+  { id: 'braille', name: 'Braille', category: 'cyberpunk', description: 'Braille-pattern letters and digits — dotted cipher text.', popularity: 80, outputKind: 'unicode', transform: (t) => applyMapping(t, BRAILLE) },
+  { id: 'regional', name: 'Regional Tag', category: 'gaming', description: 'Regional-indicator letters (🇦–🇿) — flag-alphabet badges. Lowercase matches uppercase.', popularity: 78, outputKind: 'unicode', transform: (t) => applyMapping(t, REGIONAL_INDICATORS) },
+  { id: 'cyrillic', name: 'Cyrillic', category: 'gaming', description: 'Faux-Cyrillic lettering built from real Cyrillic characters.', popularity: 82, outputKind: 'unicode', transform: (t) => applyMapping(t, CYRILLIC_LOOK) },
 ] as const;
 
 const styleById = new Map<string, UnicodeStyle>(UNICODE_STYLES.map((style) => [style.id, style]));
@@ -109,9 +138,10 @@ export function getUnicodeStyle(id: UnicodeStyleId): UnicodeStyle | undefined {
 /**
  * Convert text into a Unicode style.
  *
- * Iteration is code-point safe, so supplementary characters are never
- * split. Every character the style's alphabet does not cover is
- * preserved exactly as typed.
+ * The whole string is passed to the style transform: mapping styles work
+ * code point by code point, while order-changing styles (upside-down) can
+ * reverse each line. Every character the style's alphabet does not cover
+ * is preserved exactly as typed.
  *
  * @param text  The text to convert.
  * @param style A style id, or a style object (for ad-hoc use).
@@ -122,9 +152,5 @@ export function applyUnicodeStyle(
 ): string {
   const definition = typeof style === 'string' ? styleById.get(style) : style;
   if (!definition) return text;
-  let out = '';
-  for (const ch of Array.from(text)) {
-    out += definition.transform(ch);
-  }
-  return out;
+  return definition.transform(text);
 }
