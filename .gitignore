@@ -4,3 +4,9 @@ cookies.txt
 *.cookies
 **/cookies.txt
 **/*.cookies
+
+# Vercel CLI project link.
+.vercel
+
+# Runtime scratch space (jobs, temp conversions, Medal clips).
+server/storage/temp/

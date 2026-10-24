@@ -418,7 +418,7 @@ export class TikTokProvider implements IMediaProvider {
         // Headless-browser fallback: TikTok may still serve a WAF challenge to
         // plain fetches, so render the page when a Chromium binary exists.
         // Skipped entirely when Playwright's browser is not installed (the
-        // default on Render's native Node image) instead of throwing.
+        // default on a native Node host) instead of throwing.
         if (!directVideoUrl && (await this.playwrightAvailable())) {
           try {
             const { chromium } = await import('playwright');
@@ -890,7 +890,7 @@ export class TikTokProvider implements IMediaProvider {
   }
 
   /** Playwright is an optional dependency: the npm package ships without the
-   *  browser binary, and Render's native Node image has no Chromium at all. */
+   *  browser binary, and a native Node host may have no Chromium at all. */
   private async playwrightAvailable(): Promise<boolean> {
     if (process.env.PLAYWRIGHT_DISABLE === '1') return false;
     try {

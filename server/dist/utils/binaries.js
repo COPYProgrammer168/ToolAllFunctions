@@ -4,14 +4,14 @@ import { createRequire } from 'node:module';
 /**
  * Cross-platform ffmpeg/ffprobe resolution.
  *
- * Render (and most Linux PaaS) native Node environments do NOT ship ffmpeg,
- * and Windows boxes often do. Rather than shelling out to a hard-coded binary
- * name and hoping, we:
+ * Most Linux PaaS native Node environments do NOT ship ffmpeg, while Windows
+ * boxes often do. Rather than shelling out to a hard-coded binary name and
+ * hoping, we:
  *
  *   1. Honour explicit FFmpeg_PATH / FFprobe_PATH overrides.
  *   2. Use whatever is already on PATH (local dev, Docker image, CI).
  *   3. Fall back to the `ffmpeg-static` / `ffprobe-static` npm packages so the
- *      app works on a stock Render native instance with zero system packages.
+ *      app works on a stock native instance with zero system packages.
  *
  * Once resolved, the directories are prepended to PATH so that every existing
  * `exec('ffmpeg ...')` / `exec('ffprobe ...')` call site keeps working without

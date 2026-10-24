@@ -13,12 +13,15 @@ import { apiRouter } from './routes/api.js';
 import { JobManager } from './services/JobManager.js';
 import { MediaJobManager } from './services/MediaJobManager.js';
 import { PdfJobManager } from './modules/pdf-to-word/jobManager.js';
+import { medalJobManager } from './modules/medal-downloader/service.js';
 import { HardwareDetector } from './services/HardwareDetector.js';
 import { STORAGE_ROOT } from './utils/paths.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
-const PORT = process.env.PORT || 3001;
+// Vercel container services listen on port 80 unless PORT is set explicitly.
+// Local development keeps the historical 3001 default.
+const PORT = process.env.PORT || (process.env.VERCEL ? 80 : 3001);
 
 const clientDist = path.resolve(__dirname, '../../client/dist');
 
@@ -68,6 +71,7 @@ async function startServer() {
   await JobManager.init();
   await MediaJobManager.init();
   await PdfJobManager.init();
+  await medalJobManager.init();
   const hw = await HardwareDetector.detect();
 
   console.log('----------------------------------------------------');

@@ -74,7 +74,7 @@ RUN npx --prefix /app/server playwright install-deps chromium || true
 # Set working directory
 WORKDIR /app/server
 
-# Expose Render-assigned port
+# Default application port (override with PORT for platforms that assign one).
 ENV PORT=3001
 EXPOSE 3001
 

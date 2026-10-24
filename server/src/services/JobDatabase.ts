@@ -1,21 +1,8 @@
 import Database from 'better-sqlite3';
 import type { MediaJobRecord } from './MediaJobManager.js';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import fs from 'node:fs';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-const fallbackStorage = path.resolve(__dirname, '../../../storage');
-export const STORAGE_ROOT = process.env.STORAGE_DIR
-  ? path.resolve(process.env.STORAGE_DIR)
-  : fallbackStorage;
-
-// SQLite jobs database: override with JOBS_DB_PATH, otherwise STORAGE_ROOT/jobs.db
-export const JOBS_DB_PATH = process.env.JOBS_DB_PATH
-  ? process.env.JOBS_DB_PATH
-  : path.join(STORAGE_ROOT, 'jobs.db');
+import { JOBS_DB_PATH } from '../utils/paths.js';
 
 function getDb(): Database.Database {
   fs.mkdirSync(path.dirname(JOBS_DB_PATH), { recursive: true });

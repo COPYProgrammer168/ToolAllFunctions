@@ -444,6 +444,80 @@ export interface SitemapReport {
   notices: string[];
 }
 
+/* ─── Medal.tv downloader ─── */
+
+export type MedalJobState =
+  | 'queued'
+  | 'inspecting'
+  | 'downloading'
+  | 'done'
+  | 'failed'
+  | 'cancelled'
+  | 'download_not_available';
+
+export interface MedalClipInfo {
+  clipId: string;
+  gameSlug?: string;
+  gameName?: string;
+  title: string;
+  creator?: string;
+  durationSeconds?: number;
+  thumbnailUrl?: string;
+  uploadedAt?: string;
+  canonicalUrl: string;
+}
+
+export interface MedalInspection {
+  clip: MedalClipInfo;
+  download: {
+    available: boolean;
+    state: 'available' | 'download_not_available';
+    message?: string;
+    reason?: string;
+    container?: 'mp4';
+    contentType?: string;
+    sizeBytes?: number;
+  };
+  authorizationRequired: true;
+  authorizationNotice: string;
+  officialWorkflowUrl: string;
+  officialWorkflowLabel: string;
+  inspectedAt: string;
+}
+
+export interface MedalVideoInfo {
+  container: string;
+  videoCodec: string;
+  audioCodec?: string;
+  width: number;
+  height: number;
+  fps: number;
+  durationSeconds: number;
+  sizeBytes: number;
+}
+
+export interface MedalJobStatus {
+  jobId: string;
+  state: MedalJobState;
+  stage: string;
+  createdAt: string;
+  updatedAt: string;
+  expiresAt: string;
+  clip?: MedalClipInfo;
+  media?: MedalVideoInfo;
+  progress: {
+    /** Real percentage only; `null` when the upstream size is unknown. */
+    percent: number | null;
+    downloadedBytes: number;
+    totalBytes: number;
+  };
+  filename?: string;
+  downloadUrl?: string;
+  error?: string;
+  errorCode?: string;
+  message?: string;
+}
+
 export type AppNavSection =
   | 'studio-optimize'
   | 'seo-studio'
@@ -451,6 +525,7 @@ export type AppNavSection =
   | 'qr-studio'
   | 'pdf-to-word'
   | 'media-hub'
+  | 'media-medal-downloader'
   | 'media-video-to-music'
   | 'media-youtube'
   | 'media-soundcloud'

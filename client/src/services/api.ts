@@ -226,6 +226,8 @@ import type {
   WatermarkRegion,
   CaptionGenerationResponse,
   CaptionEnginesStatus,
+  MedalInspection,
+  MedalJobStatus,
 } from '../types';
 
 export async function probeStreamBitrate(sourceUrl: string): Promise<number | null> {
@@ -757,5 +759,71 @@ export function absoluteQrFileUrl(relativeUrl: string): string {
   if (/^https?:\/\//i.test(relativeUrl)) return relativeUrl;
   if (typeof window === 'undefined') return relativeUrl;
   return new URL(relativeUrl, window.location.origin).toString();
+}
+
+// ============================================================================
+// MEDAL.TV VIDEO DOWNLOADER
+// ============================================================================
+
+/** Inspects a public Medal clip and reports whether an original file exists. */
+export async function inspectMedalClip(url: string): Promise<MedalInspection> {
+  const res = await fetch('/api/tools/medal-downloader/inspect', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url }),
+  });
+
+  if (!res.ok) {
+    throw mediaRequestError(res, await readErrorBody(res), `Clip inspection failed (HTTP ${res.status})`);
+  }
+  return res.json();
+}
+
+export interface MedalJobStart {
+  jobId: string;
+  downloadToken: string;
+  state: string;
+  createdAt: string;
+  expiresAt: string;
+}
+
+/** Queues a download after the user explicitly attests they may download it. */
+export async function startMedalDownload(url: string): Promise<MedalJobStart> {
+  const res = await fetch('/api/tools/medal-downloader/jobs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url, authorized: true }),
+  });
+
+  if (!res.ok) {
+    throw mediaRequestError(res, await readErrorBody(res), `Could not start the Medal download (HTTP ${res.status})`);
+  }
+  return res.json();
+}
+
+export async function getMedalJob(jobId: string, token: string): Promise<MedalJobStatus> {
+  const res = await fetch(`/api/tools/medal-downloader/jobs/${encodeURIComponent(jobId)}`, {
+    headers: { 'x-download-token': token },
+  });
+
+  if (!res.ok) {
+    throw mediaRequestError(res, await readErrorBody(res), `Medal job lookup failed (HTTP ${res.status})`);
+  }
+  return res.json();
+}
+
+export async function cancelMedalDownload(jobId: string, token: string): Promise<boolean> {
+  const res = await fetch(
+    `/api/tools/medal-downloader/jobs/${encodeURIComponent(jobId)}/cancel`,
+    { method: 'POST', headers: { 'x-download-token': token } }
+  );
+  if (!res.ok) return false;
+  const data = await res.json().catch(() => ({}));
+  return Boolean(data.success);
+}
+
+/** Download links carry the token because an <a download> cannot set headers. */
+export function medalDownloadUrl(jobId: string, token: string): string {
+  return `/api/tools/medal-downloader/jobs/${encodeURIComponent(jobId)}/download?token=${encodeURIComponent(token)}`;
 }
 

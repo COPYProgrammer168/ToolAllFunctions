@@ -1,7 +1,8 @@
 # =============================================================================
 # ALTERNATIVE — node:22-slim (Debian bookworm, glibc) instead of node:22-alpine.
-# NOT referenced by render.yaml (Render here uses the native Node environment
-# with ffmpeg-static). Provided only to compare the two approaches:
+# NOT used by the Vercel services deployment (the API uses
+# server/Dockerfile.vercel with system ffmpeg). Provided only to compare the
+# two approaches:
 #
 #   docker build -f Dockerfile     -t ai-video-optimizer:alpine .   # current
 #   docker build -f Dockerfile.slim -t ai-video-optimizer:slim   .   # this one

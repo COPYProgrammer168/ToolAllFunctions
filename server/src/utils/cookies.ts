@@ -5,9 +5,9 @@ import path from 'node:path';
 /**
  * Cookie file resolution for platform downloads.
  *
- * Deployments mount a logged-in `cookies.txt` as a secret file, e.g. a Render
- * secret file at `/etc/secrets/cookies.txt`. The path comes from
- * `YT_COOKIES_FILE` and defaults to `/etc/secrets/cookies.txt`.
+ * Deployments can mount a logged-in `cookies.txt` as a secret file, e.g. at
+ * `/etc/secrets/cookies.txt`. The path comes from `YT_COOKIES_FILE` and
+ * defaults to `/etc/secrets/cookies.txt`.
  *
  * yt-dlp rewrites the jar it is given, so the secret is **copied** to
  * `/tmp/yt-cookies.txt` once at startup and the copy is what gets handed to
@@ -19,7 +19,7 @@ import path from 'node:path';
 
 /** Env var holding the path of the Netscape cookies file. */
 export const COOKIES_ENV_VAR = 'YT_COOKIES_FILE';
-/** Default location (Render secret files are mounted here). */
+/** Default location for a mounted cookies secret. */
 export const DEFAULT_COOKIES_PATH = '/etc/secrets/cookies.txt';
 /** Read/write working copy derived from the configured file. */
 export const COOKIES_WORKING_PATH = path.join(os.tmpdir(), 'yt-cookies.txt');

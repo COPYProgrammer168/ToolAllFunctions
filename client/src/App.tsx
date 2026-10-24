@@ -24,6 +24,7 @@ import { DownloadManagerView } from './components/DownloadManagerView';
 import { MediaSettingsModal } from './components/MediaSettingsModal';
 import { FontStudioView } from './components/FontStudioView';
 import { PdfToWordView } from './components/PdfToWordView';
+import { MedalDownloaderView } from './components/MedalDownloaderView';
 import { CaptionStudioView } from './components/CaptionStudioView';
 import { SeoStudioView } from './components/SeoStudioView';
 import { QrCodeView } from './components/QrCodeView';
@@ -854,6 +855,9 @@ function App() {
 
           {/* VIEW: MEDIA TOOLS OVERVIEW HUB */}
           {activeSection === 'media-hub' && <MediaHubView onNavigate={setActiveSection} />}
+
+          {/* VIEW: MEDAL.TV VIDEO DOWNLOADER */}
+          {activeSection === 'media-medal-downloader' && <MedalDownloaderView />}
 
            {/* VIEW: VIDEO TO MUSIC */}
            {activeSection === 'media-video-to-music' && (

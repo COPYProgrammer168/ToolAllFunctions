@@ -5,7 +5,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 const execFileAsync = promisify(execFile);
 /** Locate an optional yt-dlp binary. Returns `null` when it is not installed,
- *  which is the normal case on a stock Render native instance. */
+ *  which is the normal case on a stock native Node host. */
 export function findYtDlp() {
     const candidates = [
         process.env.YT_DLP_PATH,

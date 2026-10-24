@@ -15,6 +15,7 @@ import {
   FileText,
   Captions,
   QrCode,
+  Medal,
 } from 'lucide-react';
 import type { AppNavSection } from '../types';
 
@@ -119,6 +120,15 @@ export const MediaHubView: React.FC<MediaHubViewProps> = ({ onNavigate }) => {
       icon: Video,
       color: 'from-blue-500/20 to-sky-400/10 text-blue-400 border-blue-500/30',
       titleColor: 'text-blue-300',
+    },
+    {
+      id: 'media-medal-downloader' as AppNavSection,
+      title: 'Medal.tv Video Downloader',
+      badge: 'Original MP4',
+      desc: 'Download available Medal.tv gaming clips',
+      icon: Medal,
+      color: 'from-amber-400/20 to-orange-400/10 text-amber-400 border-amber-400/30',
+      titleColor: 'text-amber-300',
     },
     {
       id: 'media-watermark' as AppNavSection,

@@ -9,7 +9,7 @@ import { streamDownloadToFile } from './streamRange.js';
  *
  * The previous implementation shelled out to `curl.exe`, which only exists on
  * Windows — every muxed download (YouTube adaptive streams, TikTok audio) failed
- * on Render's Linux hosts with "curl.exe: command not found". It also interpolated
+ * on Linux hosts with "curl.exe: command not found". It also interpolated
  * untrusted URLs straight into a shell command.
  *
  * This uses `fetch` + stream piping instead, forwards HTTP Range so downloads can

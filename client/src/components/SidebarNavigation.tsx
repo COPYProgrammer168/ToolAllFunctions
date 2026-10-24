@@ -17,6 +17,7 @@ import {
   FileText,
   Captions,
   QrCode,
+  Medal,
 } from 'lucide-react';
 import type { AppNavSection } from '../types';
 
@@ -127,6 +128,12 @@ const SidebarContent: React.FC<{
           label: 'Video Downloader',
           icon: Video,
           accent: 'text-blue-400',
+        },
+        {
+          id: 'media-medal-downloader' as AppNavSection,
+          label: 'Medal.tv Clips',
+          icon: Medal,
+          accent: 'text-amber-300',
         },
         {
           id: 'media-audio-converter' as AppNavSection,

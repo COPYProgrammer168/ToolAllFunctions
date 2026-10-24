@@ -10,9 +10,9 @@ const execFileAsync = promisify(execFile);
  * Optional `yt-dlp` support.
  *
  * yt-dlp is *not* a dependency of this app — when it is installed (locally, or
- * on Render via `pip3 install --user yt-dlp`, see render.yaml) it is used as the
- * last-resort extractor for platforms whose public player metadata stops
- * resolving (age gates, consent walls, embedded-player-only playback).
+ * in a container image that adds it) it is used as the last-resort extractor
+ * for platforms whose public player metadata stops resolving (age gates,
+ * consent walls, embedded-player-only playback).
  * Everything returns `null` / degrades gracefully when it is absent.
  */
 
@@ -25,7 +25,7 @@ export interface YtDlpInvocation {
 }
 
 /** Locate an optional yt-dlp binary. Returns `null` when it is not installed,
- *  which is the normal case on a stock Render native instance. */
+ *  which is the normal case on a stock native Node host. */
 export function findYtDlp(): string | null {
   const candidates = [
     process.env.YT_DLP_PATH,

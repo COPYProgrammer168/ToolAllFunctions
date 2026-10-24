@@ -6,7 +6,8 @@
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
     "start": "node dist/server.js",
-    "test": "tsx test/test-pdf-to-word.ts"
+    "test": "tsx test/test-pdf-to-word.ts",
+    "test:medal": "tsx --test test/test-medal-downloader.ts"
   },
   "dependencies": {
     "archiver": "^8.0.0",

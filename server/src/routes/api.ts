@@ -31,6 +31,7 @@ import { STORAGE_ROOT } from '../utils/paths.js';
 import { ffprobeBin, ffmpegBin } from '../utils/binaries.js';
 import { pdfToWordRouter } from '../modules/pdf-to-word/routes.js';
 import { qrFilesRouter } from '../modules/qr-files/routes.js';
+import { medalDownloaderRouter } from '../modules/medal-downloader/routes.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -69,6 +70,8 @@ apiRouter.use('/tools/pdf-to-word', pdfToWordRouter);
 apiRouter.use('/pdf-to-word', pdfToWordRouter);
 apiRouter.use('/tools/qr-files', qrFilesRouter);
 apiRouter.use('/qr-files', qrFilesRouter);
+apiRouter.use('/tools/medal-downloader', medalDownloaderRouter);
+apiRouter.use('/medal-downloader', medalDownloaderRouter);
 
 /**
  * Translate an error into an API response. Errors that carry an HTTP status
@@ -100,7 +103,7 @@ function respondApiError(res: Response, err: any, fallbackStatus = 400): void {
   res.status(status).json(body);
 }
 
-/** Client IP for logging/rate-limiting, honouring the Render proxy header. */
+/** Client IP for logging/rate-limiting, honouring the reverse-proxy header. */
 function clientIp(req: { headers: Record<string, any>; socket?: { remoteAddress?: string } }): string {
   const forwarded = req.headers['x-forwarded-for'];
   if (typeof forwarded === 'string' && forwarded.length > 0) {
@@ -241,7 +244,7 @@ apiRouter.get('/jobs/:id/events', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
-  // Tell reverse proxies (Render/nginx) not to buffer the stream, otherwise
+  // Tell reverse proxies (nginx/Vercel) not to buffer the stream, otherwise
   // progress events arrive in bursts or only when the connection closes.
   res.setHeader('X-Accel-Buffering', 'no');
   res.socket?.setNoDelay(true);

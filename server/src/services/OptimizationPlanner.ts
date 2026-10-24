@@ -149,9 +149,9 @@ export class OptimizationPlanner {
     // Memory-aware planning: ffmpeg's motion-interpolation filter
     // (`minterpolate`, mi_mode=mci) allocates ~1GB+ per megapixel at 60fps
     // (a 1080p output peaks around 2-3GB). Instances with small memory
-    // ceilings — e.g. Render free tier with its 512MB cgroup limit — die with
-    // an OOM kill the moment it engages, which crashes the whole service and
-    // surfaces as 502s for every pending request. Downgrade to the cheap
+    // ceilings — e.g. a 512MB cgroup limit — die with an OOM kill the moment it
+    // engages, which crashes the whole service and surfaces as 502s for every
+    // pending request. Downgrade to the cheap
     // `blend` interpolation (a few frame buffers, linear streaming) instead.
     const memoryBudgetMB = HardwareDetector.memoryBudgetMB();
 

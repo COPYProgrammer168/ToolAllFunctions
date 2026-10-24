@@ -353,10 +353,9 @@ export class YouTubeProvider implements IMediaProvider {
         (clientNotes.length > 0 ? clientNotes.join('; ') : 'no Innertube client returned a usable stream');
     }
 
-    // Last resort: yt-dlp, when it is installed (local dev, or on Render via the
-    // `pip3 install --user yt-dlp` step in render.yaml). It handles consent
-    // walls, embedded-player playback and age gates that the plain Innertube
-    // call refuses to answer.
+    // Last resort: yt-dlp, when it is installed (local dev, or in a container
+    // image that adds it). It handles consent walls, embedded-player playback
+    // and age gates that the plain Innertube call refuses to answer.
     if (!directVideoUrl && !adaptiveVideoUrl && !directAudioUrl) {
       const viaYtDlp = await this.ytDlpExtractMedia(videoId, url);
       // yt-dlp's URLs are verified like any other: some of its formats are
