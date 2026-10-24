@@ -72,6 +72,9 @@ export interface FontStyleDefinition {
   outputKind: OutputKind;
   /** CSS font stack for font-preview styles (undefined for unicode styles). */
   fontFamily?: string;
+  /** True when the family is loaded from Google Fonts and can be shown
+   *  live in the card. Bundled/local families are only used for PNG export. */
+  hasWebFont?: boolean;
   /** Default nickname style id (see UNICODE_STYLES) used for the card
    *  preview and the Copy button; undefined for styles without a plain
    *  Letterlike/Alphanumeric equivalent (glitch, frames, spacing…). */
@@ -89,6 +92,8 @@ export interface FontStyleResult {
   output: string;
   outputKind: OutputKind;
   fontFamily?: string;
+  /** Whether the visual family is available for a live card specimen. */
+  hasWebFont?: boolean;
   /** Raw text the result was generated from (Image/PNG render this in the
    *  card's visual font, so the font look survives the export). */
   sourceText: string;

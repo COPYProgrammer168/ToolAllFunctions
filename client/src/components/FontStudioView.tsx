@@ -127,6 +127,11 @@ const NICKNAME_LIMIT = 32;
 /** Engine over the nickname styles — powers the per-card style override. */
 const nicknameEngine = new FontStyleEngine(NICKNAME_STYLES);
 
+/** Static options shared by every card's style dropdown — built once. */
+const NICKNAME_OPTIONS = NICKNAME_STYLES.map((style) => (
+  <option key={style.id} value={style.id}>{style.name}</option>
+));
+
 /* ── Component ──────────────────────────────────────────────────────────── */
 
 export const FontStudioView: React.FC = () => {
@@ -581,7 +586,7 @@ export const FontStudioView: React.FC = () => {
 
       {status === 'ready' && results.length > 0 && (
         <section className="space-y-4" aria-label="Generated styles">
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          <div data-testid="font-style-grid" className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             {results.slice(0, visibleCount).map((result) => (
               <FontStyleCard
                 key={result.styleId}
@@ -589,10 +594,10 @@ export const FontStudioView: React.FC = () => {
                 isFavorite={favorites.includes(result.styleId)}
                 styleId={styleOverrides[result.styleId] ?? result.defaultStyleId ?? ''}
                 onStyleChange={handleStyleChange}
-                onCopy={() => handleCopy(result)}
-                onCopyImage={() => handleCopyImage(result)}
-                onToggleFavorite={() => toggleFavorite(result.styleId)}
-                onExportPng={() => handlePngExport(result)}
+                onCopy={handleCopy}
+                onCopyImage={handleCopyImage}
+                onToggleFavorite={toggleFavorite}
+                onExportPng={handlePngExport}
               />
             ))}
           </div>
@@ -674,10 +679,10 @@ interface FontStyleCardProps {
   /** Effective Unicode style id (per-card override, else the card default). */
   styleId: UnicodeStyleId | '';
   onStyleChange: (cardId: string, styleId: UnicodeStyleId | '') => void;
-  onCopy: () => void;
-  onCopyImage: () => void;
-  onToggleFavorite: () => void;
-  onExportPng: () => void;
+  onCopy: (result: FontStyleResult) => void;
+  onCopyImage: (result: FontStyleResult) => void;
+  onToggleFavorite: (styleId: string) => void;
+  onExportPng: (result: FontStyleResult) => void;
 }
 
 const kindBadge = (kind: OutputKind) =>
@@ -693,6 +698,9 @@ const FontStyleCard: React.FC<FontStyleCardProps> = React.memo(
     // so the counter measures the converted string, not the input.
     const nicknameLength = [...result.output].length;
     const overNicknameLimit = nicknameLength > NICKNAME_LIMIT;
+    // Keep the live font specimen to a single short line on the card.
+    const fontSample =
+      result.sourceText.length > 48 ? `${result.sourceText.slice(0, 48)}…` : result.sourceText;
 
     return (
       <article className="glass-panel rounded-2xl border border-white/[0.08] p-3.5 sm:p-4 flex flex-col gap-3 hover:border-white/20 transition-all">
@@ -704,7 +712,7 @@ const FontStyleCard: React.FC<FontStyleCardProps> = React.memo(
             </span>
           </div>
           <button
-            onClick={onToggleFavorite}
+            onClick={() => onToggleFavorite(result.styleId)}
             aria-label={`${isFavorite ? 'Remove from' : 'Add to'} favorites: ${result.styleName}`}
             aria-pressed={isFavorite}
             className={`p-2 rounded-lg border transition-all shrink-0 ${
@@ -717,8 +725,24 @@ const FontStyleCard: React.FC<FontStyleCardProps> = React.memo(
           </button>
         </header>
 
-        {/* Preview is deliberately a plain system font: what you see here
-            is character-for-character what Copy puts on the clipboard. */}
+        {/* Google-hosted faces get a live specimen so the actual font is
+            visible in the studio. Local/bundled faces skip this line. */}
+        {result.hasWebFont && result.fontFamily && (
+          <div className="rounded-xl border border-white/5 bg-black/30 px-3 py-2">
+            <p className="text-[9px] font-bold uppercase tracking-wider text-neutral-500">
+              Font look · PNG export
+            </p>
+            <p
+              className="mt-0.5 text-lg sm:text-xl leading-snug text-neutral-100 break-words"
+              style={{ fontFamily: result.fontFamily }}
+            >
+              {fontSample}
+            </p>
+          </div>
+        )}
+
+        {/* Copy preview stays a plain system font: what you see here is
+            character-for-character what Copy puts on the clipboard. */}
         <p className="text-base sm:text-lg leading-relaxed text-neutral-100 break-words min-h-[2rem]">
           {result.output || <span className="text-neutral-600 text-sm">(empty output)</span>}
         </p>
@@ -748,15 +772,13 @@ const FontStyleCard: React.FC<FontStyleCardProps> = React.memo(
             className="w-full bg-black/40 border border-white/10 rounded-xl px-2.5 py-1.5 text-[11px] text-neutral-200 focus:outline-none focus:border-cyan-500/50"
           >
             {!result.defaultStyleId && <option value="">Card default (no override)</option>}
-            {NICKNAME_STYLES.map((s) => (
-              <option key={s.id} value={s.id}>{s.name}</option>
-            ))}
+            {NICKNAME_OPTIONS}
           </select>
         </div>
 
         <footer className="flex flex-wrap items-center gap-2 pt-1 border-t border-white/5">
           <button
-            onClick={onCopy}
+            onClick={() => onCopy(result)}
             title="Copy as Unicode text — paste it into Discord, TikTok, Instagram or any plain-text field"
             className="flex-1 px-3 py-2 rounded-xl bg-white/10 hover:bg-white/20 border border-white/20 text-xs font-semibold text-neutral-100 transition-all flex items-center justify-center gap-2 min-w-[5.5rem]"
           >
@@ -766,7 +788,7 @@ const FontStyleCard: React.FC<FontStyleCardProps> = React.memo(
           {result.outputKind === 'font-preview' && (
             <>
               <button
-                onClick={onCopyImage}
+                onClick={() => onCopyImage(result)}
                 aria-label={`Copy ${result.styleName} as image`}
                 title="Copy the rendered text as a PNG image (paste anywhere)"
                 className="px-2.5 py-2 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-[11px] text-neutral-400 hover:text-neutral-200 transition-all flex items-center gap-1.5"
@@ -775,7 +797,7 @@ const FontStyleCard: React.FC<FontStyleCardProps> = React.memo(
                 Image
               </button>
               <button
-                onClick={onExportPng}
+                onClick={() => onExportPng(result)}
                 aria-label={`Download ${result.styleName} as transparent PNG`}
                 title="Download the rendered text as a transparent PNG file"
                 className="px-2.5 py-2 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-[11px] text-neutral-400 hover:text-neutral-200 transition-all flex items-center gap-1.5"

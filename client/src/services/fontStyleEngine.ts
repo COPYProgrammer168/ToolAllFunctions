@@ -320,6 +320,7 @@ export class TextTransformationRepository {
       output: this.engine.transform(text, style, options),
       outputKind: style.outputKind,
       fontFamily: style.fontFamily,
+      hasWebFont: style.hasWebFont,
       sourceText: text,
       defaultStyleId: style.defaultStyleId,
     }));

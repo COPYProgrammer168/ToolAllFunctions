@@ -114,6 +114,7 @@ describe('style catalog integrity', () => {
       'gm-black-ops',
       'df-creepster',
       'go-metal-mania',
+      'go-chinooo',
       'sf-righteous',
       'cp-rubik-glitch',
     ];
@@ -123,6 +124,18 @@ describe('style catalog integrity', () => {
       expect(style!.outputKind, id).toBe('font-preview');
       expect(style!.fontFamily, id).toBeTruthy();
     }
+  });
+
+  it('offers the Chinooo blackletter card with the Pirata One face', () => {
+    const style = FONT_STYLES.find((s) => s.id === 'go-chinooo');
+    expect(style).toBeDefined();
+    expect(style!.name).toBe('Chinooo Blackletter');
+    expect(style!.category).toBe('gothic');
+    expect(style!.outputKind).toBe('font-preview');
+    expect(style!.fontFamily).toContain('Pirata One');
+    expect(style!.hasWebFont).toBe(true);
+    expect(style!.defaultStyleId).toBe('bold-fraktur');
+    expect(engine.transform('Chinooo', style!)).not.toBe('Chinooo');
   });
 });
 

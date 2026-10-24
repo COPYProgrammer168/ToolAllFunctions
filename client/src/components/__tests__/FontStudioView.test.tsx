@@ -327,7 +327,9 @@ describe('FontStudioView', () => {
     } else {
       expect(screen.getByRole('button', { name: /Show more styles/ })).toBeTruthy();
     }
-  });
+    // jsdom renders ~60 <option> nodes per card, so reaching 72 cards is
+    // disproportionately slow in CI; give this test room beyond the default.
+  }, 120_000);
 
   it('offers the bundled sci-fi and gothic font previews', async () => {
     const user = userEvent.setup();
@@ -391,5 +393,31 @@ describe('FontStudioView', () => {
     const dropdown = within(card).getByLabelText('Unicode style') as HTMLSelectElement;
     expect(dropdown.value).toBe('');
     expect(within(card).getByText(/— Hi —/)).toBeTruthy();
+  });
+
+  it('shows the Chinooo blackletter card with a live Pirata One specimen', async () => {
+    const user = userEvent.setup();
+    render(<FontStudioView />);
+    await typeText(user, 'Chinooo');
+
+    await user.type(screen.getByLabelText('Search styles'), 'chinooo');
+    const card = screen.getByText('Chinooo Blackletter').closest('article')!;
+
+    expect(within(card).getByText('Unicode + font image')).toBeTruthy();
+    const specimen = within(card).getByText('Chinooo');
+    expect(specimen.getAttribute('style')).toContain('Pirata One');
+    expect(
+      within(card).getByRole('button', { name: 'Download Chinooo Blackletter as transparent PNG' })
+    ).toBeTruthy();
+    // Copy still gives real Unicode, not plain text.
+    await user.click(within(card).getByRole('button', { name: 'Copy' }));
+    expect(await readClipboard()).not.toBe('Chinooo');
+  });
+
+  it('lays font cards out four per row on desktop', async () => {
+    const user = userEvent.setup();
+    render(<FontStudioView />);
+    await typeText(user, 'Hi');
+    expect(screen.getByTestId('font-style-grid').className).toContain('lg:grid-cols-4');
   });
 });
