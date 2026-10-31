@@ -202,7 +202,30 @@ apiRouter.post('/jobs', upload.single('video'), async (req, res) => {
       filePath = req.file.path;
       originalName = req.file.originalname;
     } else if (req.body.tempPath) {
-      filePath = req.body.tempPath;
+      // tempPath comes from the client, so only accept files inside the
+      // server's storage root. This also catches stale paths from another
+      // ephemeral container instead of renaming/deleting an arbitrary file.
+      const storageRoot = path.resolve(STORAGE_ROOT);
+      const resolvedTempPath = path.resolve(String(req.body.tempPath));
+      const isInsideStorage =
+        resolvedTempPath === storageRoot ||
+        resolvedTempPath.startsWith(storageRoot + path.sep);
+
+      if (!isInsideStorage) {
+        return res.status(400).json({ error: 'Invalid upload path.' });
+      }
+
+      try {
+        await fs.access(resolvedTempPath);
+      } catch {
+        return res.status(410).json({
+          error:
+            'The uploaded video is no longer available on this server. Please start the optimization again.',
+          code: 'UPLOAD_EXPIRED',
+        });
+      }
+
+      filePath = resolvedTempPath;
       originalName = req.body.originalName || 'video.mp4';
     } else {
       return res.status(400).json({ error: 'No video file or tempPath provided' });
@@ -1095,15 +1118,21 @@ apiRouter.post('/media/upload-chunk', uploadChunk.single('chunk'), async (req, r
       const assembledName = `${Date.now()}_${nanoid(6)}${ext}`;
       const assembledPath = path.join(UPLOAD_DIR, assembledName);
 
-      const writeStream = (await import('node:fs')).createWriteStream(assembledPath);
-      for (let i = 0; i < totalCount; i++) {
-        const partFile = path.join(chunkDir, `part_${i}`);
-        const partBuf = await fs.readFile(partFile);
-        writeStream.write(partBuf);
+      // Write each part and await completion instead of queuing every part in
+      // a write stream's buffer: a 200 MB+ source must not be held in memory.
+      const assembledFile = await fs.open(assembledPath, 'w');
+      try {
+        for (let i = 0; i < totalCount; i++) {
+          const partFile = path.join(chunkDir, `part_${i}`);
+          const partBuf = await fs.readFile(partFile);
+          await assembledFile.write(partBuf);
+        }
+      } catch (err) {
+        await assembledFile.close().catch(() => {});
+        await fs.rm(assembledPath, { force: true }).catch(() => {});
+        throw err;
       }
-      await new Promise<void>((resolve, reject) => {
-        writeStream.end((err?: Error | null) => (err ? reject(err) : resolve()));
-      });
+      await assembledFile.close();
 
       // Cleanup chunks directory
       await fs.rm(chunkDir, { recursive: true, force: true });

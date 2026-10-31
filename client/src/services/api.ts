@@ -54,11 +54,80 @@ export async function generateDemoVideo(): Promise<AnalysisResponse> {
 /** Vercel rejects request bodies over 4.5 MB, so larger files go up in chunks. */
 const DIRECT_UPLOAD_LIMIT_BYTES = 4 * 1024 * 1024;
 const UPLOAD_CHUNK_SIZE = 3 * 1024 * 1024;
+const MAX_CHUNK_ATTEMPTS = 3;
 
 interface ChunkedUploadResult {
   tempPath: string;
   originalName: string;
   sizeBytes: number;
+}
+
+/** Error from starting a job, keeping the server's error code / technical detail. */
+export class JobStartError extends Error {
+  readonly status: number;
+  readonly code?: string;
+  readonly technicalError?: string;
+
+  constructor(
+    message: string,
+    options: { status: number; code?: string; technicalError?: string }
+  ) {
+    super(message);
+    this.name = 'JobStartError';
+    this.status = options.status;
+    this.code = options.code;
+    this.technicalError = options.technicalError;
+  }
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * POST one upload chunk, retrying transient failures (network drop, 429,
+ * 5xx). A Vercel container can cold-start or restart between chunks, so a
+ * single failed request must not abandon a multi-minute upload.
+ */
+async function postUploadChunk(
+  formData: FormData,
+  chunkIndex: number,
+  totalChunks: number
+): Promise<ChunkedUploadResult & { completed: boolean }> {
+  let lastError: Error | null = null;
+
+  for (let attempt = 1; attempt <= MAX_CHUNK_ATTEMPTS; attempt++) {
+    try {
+      const res = await fetch('/api/media/upload-chunk', { method: 'POST', body: formData });
+      if (res.ok) return res.json();
+
+      const body = await readErrorBody(res);
+      const message =
+        (typeof body.error === 'string' && body.error) ||
+        `Upload failed on chunk ${chunkIndex + 1}/${totalChunks} (HTTP ${res.status})`;
+
+      // Retry only errors that may be temporary. A 400/413/415 will fail the
+      // same way again and should be shown to the user immediately.
+      if (res.status < 500 && res.status !== 429) {
+        throw new JobStartError(message, { status: res.status, code: body.code });
+      }
+      lastError = new Error(message);
+    } catch (err: any) {
+      if (err instanceof JobStartError) throw err;
+
+      // fetch() rejects with TypeError on network failures / CORS / aborted
+      // connections. Those are worth retrying.
+      lastError = new Error(
+        `Could not reach the processing server while uploading chunk ${
+          chunkIndex + 1
+        }/${totalChunks}. ${err?.message || ''}`.trim()
+      );
+    }
+
+    if (attempt < MAX_CHUNK_ATTEMPTS) {
+      await sleep(1000 * attempt);
+    }
+  }
+
+  throw lastError ?? new Error('Chunk upload failed.');
 }
 
 /**
@@ -86,23 +155,38 @@ async function uploadFileInChunks(
     formData.append('totalChunks', totalChunks.toString());
     formData.append('fileName', file.name);
 
-    const res = await fetch('/api/media/upload-chunk', { method: 'POST', body: formData });
-    if (!res.ok) {
-      const body = await readErrorBody(res);
-      throw new Error(
-        body.error || `Upload failed on chunk ${chunkIndex + 1}/${totalChunks} (HTTP ${res.status})`
-      );
-    }
-
-    const data = await res.json();
+    const data = await postUploadChunk(formData, chunkIndex, totalChunks);
     onProgress?.(Math.round(((chunkIndex + 1) / totalChunks) * 100));
 
     if (data.completed) {
-      return data as ChunkedUploadResult;
+      return data;
     }
   }
 
   throw new Error('Chunked upload did not complete cleanly.');
+}
+
+async function requestOptimizationJob(formData: FormData): Promise<{ jobId: string }> {
+  const res = await fetch('/api/jobs', {
+    method: 'POST',
+    body: formData,
+  });
+
+  if (!res.ok) {
+    const body = await readErrorBody(res);
+    throw new JobStartError(
+      (typeof body.error === 'string' && body.error) ||
+        `Failed to start optimization job (HTTP ${res.status})`,
+      {
+        status: res.status,
+        code: typeof body.code === 'string' ? body.code : undefined,
+        technicalError:
+          typeof body.technicalError === 'string' ? body.technicalError : undefined,
+      }
+    );
+  }
+
+  return res.json();
 }
 
 export async function createOptimizationJob(params: {
@@ -110,39 +194,53 @@ export async function createOptimizationJob(params: {
   tempPath?: string | null;
   originalName: string;
   config: Partial<JobConfig>;
+  /** 0–100 while a large source file is uploaded to the server. */
+  onUploadProgress?: (percent: number) => void;
 }): Promise<{ jobId: string }> {
-  let fileToUpload = params.file ?? null;
+  const originalFile = params.file ?? null;
+  let fileToUpload = originalFile;
   let tempPath = params.tempPath ?? null;
 
   // The source is no longer uploaded during analysis. If the user picked a
   // file and it is too large for one request, assemble it server-side first.
   if (fileToUpload && fileToUpload.size > DIRECT_UPLOAD_LIMIT_BYTES) {
-    const uploaded = await uploadFileInChunks(fileToUpload);
+    const uploaded = await uploadFileInChunks(fileToUpload, params.onUploadProgress);
     tempPath = uploaded.tempPath;
     fileToUpload = null;
   }
 
-  const formData = new FormData();
-  if (fileToUpload) {
-    formData.append('video', fileToUpload);
-  }
-  if (tempPath) {
-    formData.append('tempPath', tempPath);
-  }
-  formData.append('originalName', params.originalName);
-  formData.append('config', JSON.stringify(params.config));
+  const buildFormData = () => {
+    const formData = new FormData();
+    if (fileToUpload) {
+      formData.append('video', fileToUpload);
+    }
+    if (tempPath) {
+      formData.append('tempPath', tempPath);
+    }
+    formData.append('originalName', params.originalName);
+    formData.append('config', JSON.stringify(params.config));
+    return formData;
+  };
 
-  const res = await fetch('/api/jobs', {
-    method: 'POST',
-    body: formData,
-  });
+  try {
+    return await requestOptimizationJob(buildFormData());
+  } catch (err) {
+    // Vercel containers are ephemeral and may serve the chunk upload and the
+    // job creation from different instances. The server reports that case as
+    // UPLOAD_EXPIRED; re-upload once and retry rather than failing the click.
+    const canRetry =
+      err instanceof JobStartError &&
+      err.code === 'UPLOAD_EXPIRED' &&
+      !!originalFile &&
+      originalFile.size > DIRECT_UPLOAD_LIMIT_BYTES;
 
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.error || 'Failed to start optimization job');
+    if (!canRetry) throw err;
+
+    const uploaded = await uploadFileInChunks(originalFile, params.onUploadProgress);
+    tempPath = uploaded.tempPath;
+    fileToUpload = null;
+    return requestOptimizationJob(buildFormData());
   }
-
-  return res.json();
 }
 
 export async function cancelJob(jobId: string): Promise<boolean> {

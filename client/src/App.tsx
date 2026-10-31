@@ -81,6 +81,13 @@ function App() {
   // uploaded only when the user starts an optimization job.
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [originalName, setOriginalName] = useState('');
+  // The source upload happens when "Start Optimization" is clicked. Keep its
+  // state separate from analysis so the workspace can show upload progress and
+  // the real failure instead of appearing to do nothing.
+  const [isStarting, setIsStarting] = useState(false);
+  const [startProgress, setStartProgress] = useState(0);
+  const [startError, setStartError] = useState<{ message: string; details?: string } | null>(null);
+  const startLockRef = useRef(false);
   const [config, setConfig] = useState<Partial<JobConfig>>({
     mode: 'smart',
     scenario: 'realistic',
@@ -162,6 +169,8 @@ function App() {
     setOriginalName(file.name);
     setSelectedFile(file);
     setTempPath(null);
+    setStartError(null);
+    setStartProgress(0);
     setUploadProgress(0);
     try {
       const data = await analyzeVideoFile(file, (p) => setUploadProgress(p));
@@ -181,6 +190,8 @@ function App() {
 
   const handleLoadDemo = async () => {
     setView('ANALYZING');
+    setStartError(null);
+    setStartProgress(0);
     try {
       const data = await generateDemoVideo();
       setReport(data.report);
@@ -208,10 +219,21 @@ function App() {
   }, [report]);
 
   const startOptimization = async (isPreview = false) => {
-    if (!tempPath && !selectedFile) return;
+    if (startLockRef.current) return;
+
+    if (!tempPath && !selectedFile) {
+      setStartError({
+        message: 'Select a video before starting the optimization.',
+      });
+      return;
+    }
 
     // A previous job's stream/poller must not keep writing into this run.
     stopJobTracking();
+    startLockRef.current = true;
+    setIsStarting(true);
+    setStartProgress(0);
+    setStartError(null);
 
     try {
       const { jobId } = await createOptimizationJob({
@@ -219,6 +241,7 @@ function App() {
         tempPath,
         originalName,
         config: { ...config, isPreview, previewDuration: 5 },
+        onUploadProgress: setStartProgress,
       });
 
       const initialProgress: JobProgress = {
@@ -342,7 +365,17 @@ function App() {
         }
       );
     } catch (err: any) {
-      alert(`Failed to start optimization: ${err.message}`);
+      const isNetworkError = err instanceof TypeError;
+      setStartError({
+        message: isNetworkError
+          ? 'Could not reach the processing server. Check your connection and try again.'
+          : err?.message || 'Failed to start optimization. Please try again.',
+        details: err?.technicalError,
+      });
+    } finally {
+      startLockRef.current = false;
+      setIsStarting(false);
+      setStartProgress(0);
     }
   };
 
@@ -364,6 +397,9 @@ function App() {
     setCurrentJobId(null);
     setTempPath(null);
     setSelectedFile(null);
+    setStartError(null);
+    setStartProgress(0);
+    setIsStarting(false);
     setConfig({});
     setActiveTab('optimize');
     setActiveSection('studio-optimize');
@@ -377,6 +413,8 @@ function App() {
       setTempPath(data.tempPath);
       setSelectedFile(null);
       setOriginalName(data.originalName);
+      setStartError(null);
+      setStartProgress(0);
       applyRecommendedConfig(data.report.metadata);
       setActiveSection('studio-optimize');
       setView('WORKSPACE');
@@ -563,6 +601,9 @@ function App() {
                               onStartOptimization={() => startOptimization(false)}
                               onPreview={() => startOptimization(true)}
                               isProcessing={isProcessing}
+                              isStarting={isStarting}
+                              startProgress={startProgress}
+                              startError={startError}
                               warnings={report.recommendations.details}
                             />
                           </div>

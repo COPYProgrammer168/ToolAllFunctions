@@ -1,5 +1,5 @@
 import React from 'react';
-import { SlidersHorizontal, Gauge } from 'lucide-react';
+import { AlertCircle, SlidersHorizontal, Gauge } from 'lucide-react';
 import type { JobConfig } from '../types';
 import { PresetSelector } from './PresetSelector';
 import { configForPreset } from '../services/presetConfig';
@@ -10,6 +10,9 @@ interface OptimizationPanelProps {
   onStartOptimization: () => void;
   onPreview: () => void;
   isProcessing: boolean;
+  isStarting: boolean;
+  startProgress: number;
+  startError: { message: string; details?: string } | null;
   warnings: string[];
 }
 
@@ -19,9 +22,13 @@ export const OptimizationPanel: React.FC<OptimizationPanelProps> = ({
   onStartOptimization,
   onPreview,
   isProcessing,
+  isStarting,
+  startProgress,
+  startError,
   warnings,
 }) => {
   const set = (key: keyof JobConfig, value: any) => onChange({ [key]: value });
+  const startDisabled = isProcessing || isStarting;
 
   return (
     <div className="glass-panel rounded-2xl border border-white/[0.08] overflow-hidden">
@@ -204,18 +211,62 @@ export const OptimizationPanel: React.FC<OptimizationPanelProps> = ({
         <div className="space-y-2 pt-3 border-t border-white/5">
           <button
             onClick={onStartOptimization}
-            disabled={isProcessing}
-            className="w-full py-3.5 rounded-xl bg-white hover:bg-neutral-200 disabled:opacity-50 text-black font-bold text-sm transition-all shadow-lg shadow-white/20"
+            disabled={startDisabled}
+            className="w-full py-3.5 rounded-xl bg-white hover:bg-neutral-200 disabled:opacity-50 disabled:cursor-not-allowed text-black font-bold text-sm transition-all shadow-lg shadow-white/20"
           >
-            {isProcessing ? 'Processing...' : 'Start Optimization'}
+            {isProcessing
+              ? 'Processing...'
+              : isStarting
+              ? startProgress > 0
+                ? `Uploading video… ${startProgress}%`
+                : 'Preparing upload…'
+              : 'Start Optimization'}
           </button>
           <button
             onClick={onPreview}
-            disabled={isProcessing}
+            disabled={startDisabled}
             className="w-full py-3 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-neutral-200 font-medium text-sm transition-all disabled:opacity-50"
           >
             Preview 5 Seconds
           </button>
+
+          {isStarting && (
+            <div className="space-y-1.5 pt-1" aria-live="polite">
+              <div className="h-1.5 w-full bg-white/10 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-gradient-to-r from-white to-neutral-400 transition-all duration-200"
+                  style={{ width: `${Math.max(4, startProgress)}%` }}
+                />
+              </div>
+              <p className="text-[11px] leading-relaxed text-neutral-400">
+                {startProgress >= 100
+                  ? 'Upload complete. Starting the processing job…'
+                  : 'Your video is uploaded now that optimization has started. Keep this tab open.'}
+              </p>
+            </div>
+          )}
+
+          {startError && !isStarting && (
+            <div
+              role="alert"
+              className="mt-2 rounded-xl border border-red-400/30 bg-red-500/10 p-3 space-y-1.5"
+            >
+              <p className="text-xs font-semibold text-red-200 flex items-start gap-1.5">
+                <AlertCircle className="w-3.5 h-3.5 mt-px shrink-0" />
+                <span>{startError.message}</span>
+              </p>
+              {startError.details && (
+                <details className="text-[11px] text-neutral-400">
+                  <summary className="cursor-pointer hover:text-neutral-200">
+                    Technical details
+                  </summary>
+                  <pre className="mt-1.5 whitespace-pre-wrap break-all rounded-lg bg-black/30 p-2">
+                    {startError.details}
+                  </pre>
+                </details>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </div>
