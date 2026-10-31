@@ -143,3 +143,46 @@ export interface HardwareInfo {
   cpuCores: number;
   freeMemoryMB: number;
 }
+
+export interface PlannedPipeline {
+  config: JobConfig;
+  filters: {
+    deblock: boolean;
+    deband: boolean;
+    denoise: 'off' | 'low' | 'medium' | 'high';
+    sharpen: 'off' | 'soft' | 'natural' | 'sharp' | 'ultra_sharp';
+    scaleWidth?: number;
+    scaleHeight?: number;
+    upscalingMethod: 'none' | 'lanczos' | 'spline';
+    targetFps: number;
+    interpolateMode: 'none' | 'mci' | 'blend';
+    aspectRatioStrategy: AspectRatioStrategy;
+    colorProfile: 'original' | 'natural' | 'vibrant' | 'cinematic';
+    audioNormalization: boolean;
+  };
+  encoding: {
+    videoCodec: string;
+    audioCodec: string;
+    crf: number;
+    videoBitrateKbps: number;
+    audioBitrateKbps: number;
+    preset: string;
+    profile: string;
+    level: string;
+    pixFmt: string;
+  };
+  warnings: string[];
+  explanation: string;
+}
+
+export interface JobRecord {
+  id: string;
+  jobDir: string;
+  inputPath: string;
+  outputPath: string;
+  meta: VideoMetadata;
+  config: JobConfig;
+  plan: PlannedPipeline;
+  progress: JobProgress;
+  createdAt: number;
+}
