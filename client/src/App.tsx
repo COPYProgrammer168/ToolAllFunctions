@@ -77,6 +77,9 @@ function App() {
   const [hardware, setHardware] = useState<HardwareInfo | null>(null);
   const [currentJobId, setCurrentJobId] = useState<string | null>(null);
   const [tempPath, setTempPath] = useState<string | null>(null);
+  // The locally selected source. Analysis happens in the browser; this file is
+  // uploaded only when the user starts an optimization job.
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [originalName, setOriginalName] = useState('');
   const [config, setConfig] = useState<Partial<JobConfig>>({
     mode: 'smart',
@@ -157,15 +160,19 @@ function App() {
   const handleFileSelect = async (file: File) => {
     setView('ANALYZING');
     setOriginalName(file.name);
+    setSelectedFile(file);
+    setTempPath(null);
+    setUploadProgress(0);
     try {
       const data = await analyzeVideoFile(file, (p) => setUploadProgress(p));
       setReport(data.report);
-      setTempPath(data.tempPath);
+      setTempPath(data.tempPath || null);
       applyRecommendedConfig(data.report.metadata);
       setView('WORKSPACE');
       setActiveTab('optimize');
     } catch (err: any) {
-      alert(`Analysis failed: ${err.message}`);
+      setSelectedFile(null);
+      alert(`Analysis failed: ${err?.message || 'MediaInfo could not read this video.'}`);
       setView('IDLE');
     } finally {
       setUploadProgress(0);
@@ -178,6 +185,7 @@ function App() {
       const data = await generateDemoVideo();
       setReport(data.report);
       setTempPath(data.tempPath);
+      setSelectedFile(null);
       setOriginalName(data.originalName);
       applyRecommendedConfig(data.report.metadata);
       setView('WORKSPACE');
@@ -200,13 +208,14 @@ function App() {
   }, [report]);
 
   const startOptimization = async (isPreview = false) => {
-    if (!tempPath) return;
+    if (!tempPath && !selectedFile) return;
 
     // A previous job's stream/poller must not keep writing into this run.
     stopJobTracking();
 
     try {
       const { jobId } = await createOptimizationJob({
+        file: selectedFile,
         tempPath,
         originalName,
         config: { ...config, isPreview, previewDuration: 5 },
@@ -354,6 +363,7 @@ function App() {
     setJobProgress(null);
     setCurrentJobId(null);
     setTempPath(null);
+    setSelectedFile(null);
     setConfig({});
     setActiveTab('optimize');
     setActiveSection('studio-optimize');
@@ -365,6 +375,7 @@ function App() {
       const data = await sendMediaToOptimizer(filePath, name);
       setReport(data.report);
       setTempPath(data.tempPath);
+      setSelectedFile(null);
       setOriginalName(data.originalName);
       applyRecommendedConfig(data.report.metadata);
       setActiveSection('studio-optimize');
@@ -558,7 +569,7 @@ function App() {
                         </>
                       )}
 
-                      {activeTab === 'compare' && tempPath && (
+                      {activeTab === 'compare' && (tempPath || selectedFile) && (
                         <div className="glass-panel p-5 rounded-2xl border border-white/[0.08]">
                           <ComparisonViewer
                             srcOriginal={`/api/jobs/${currentJobId || 'preview'}/source`}

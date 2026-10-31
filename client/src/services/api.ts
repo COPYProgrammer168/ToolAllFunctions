@@ -7,6 +7,7 @@ import type {
   SeoAnalyzeScope,
   SitemapReport,
 } from '../types';
+import { analyzeVideoFileInBrowser } from './videoAnalysis';
 
 export interface AnalysisResponse {
   report: OptimizationReport;
@@ -21,44 +22,24 @@ export async function fetchHardwareInfo(): Promise<HardwareInfo> {
   return res.json();
 }
 
-export async function analyzeVideoFile(file: File, onUploadProgress?: (percent: number) => void): Promise<AnalysisResponse> {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    const formData = new FormData();
-    formData.append('video', file);
-
-    xhr.open('POST', '/api/video/analyze');
-
-    if (xhr.upload && onUploadProgress) {
-      xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable) {
-          const percent = Math.round((e.loaded / e.total) * 100);
-          onUploadProgress(percent);
-        }
-      };
-    }
-
-    xhr.onload = () => {
-      if (xhr.status >= 200 && xhr.status < 300) {
-        try {
-          const data = JSON.parse(xhr.responseText);
-          resolve(data);
-        } catch {
-          reject(new Error('Invalid response from server'));
-        }
-      } else {
-        try {
-          const err = JSON.parse(xhr.responseText);
-          reject(new Error(err.error || 'Video analysis failed'));
-        } catch {
-          reject(new Error(`Server error: ${xhr.status}`));
-        }
-      }
-    };
-
-    xhr.onerror = () => reject(new Error('Network error during upload'));
-    xhr.send(formData);
-  });
+/**
+ * Analyze a selected file locally with MediaInfo.js. No bytes are uploaded:
+ * MediaInfo reads the File through chunked slices in the browser.
+ *
+ * `tempPath` is intentionally empty — the source is uploaded only if/when the
+ * user starts an optimization job (see `createOptimizationJob`).
+ */
+export async function analyzeVideoFile(
+  file: File,
+  onProgress?: (percent: number) => void
+): Promise<AnalysisResponse> {
+  const report = await analyzeVideoFileInBrowser(file, onProgress);
+  return {
+    report,
+    tempPath: '',
+    originalName: file.name,
+    sizeBytes: file.size,
+  };
 }
 
 export async function generateDemoVideo(): Promise<AnalysisResponse> {
@@ -70,18 +51,83 @@ export async function generateDemoVideo(): Promise<AnalysisResponse> {
   return res.json();
 }
 
+/** Vercel rejects request bodies over 4.5 MB, so larger files go up in chunks. */
+const DIRECT_UPLOAD_LIMIT_BYTES = 4 * 1024 * 1024;
+const UPLOAD_CHUNK_SIZE = 3 * 1024 * 1024;
+
+interface ChunkedUploadResult {
+  tempPath: string;
+  originalName: string;
+  sizeBytes: number;
+}
+
+/**
+ * Upload a local file to the server in small chunks and return its assembled
+ * temp path. Used only when the user starts processing — never for analysis.
+ */
+async function uploadFileInChunks(
+  file: File,
+  onProgress?: (percent: number) => void
+): Promise<ChunkedUploadResult> {
+  if (file.size <= 0) throw new Error('Cannot upload an empty video file.');
+
+  const totalChunks = Math.ceil(file.size / UPLOAD_CHUNK_SIZE);
+  const fileId = `${Date.now()}_${Math.random().toString(36).slice(2)}_${file.name.replace(/[^a-zA-Z0-9]/g, '')}`;
+
+  for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+    const start = chunkIndex * UPLOAD_CHUNK_SIZE;
+    const end = Math.min(file.size, start + UPLOAD_CHUNK_SIZE);
+    const chunk = file.slice(start, end);
+
+    const formData = new FormData();
+    formData.append('chunk', chunk);
+    formData.append('fileId', fileId);
+    formData.append('chunkIndex', chunkIndex.toString());
+    formData.append('totalChunks', totalChunks.toString());
+    formData.append('fileName', file.name);
+
+    const res = await fetch('/api/media/upload-chunk', { method: 'POST', body: formData });
+    if (!res.ok) {
+      const body = await readErrorBody(res);
+      throw new Error(
+        body.error || `Upload failed on chunk ${chunkIndex + 1}/${totalChunks} (HTTP ${res.status})`
+      );
+    }
+
+    const data = await res.json();
+    onProgress?.(Math.round(((chunkIndex + 1) / totalChunks) * 100));
+
+    if (data.completed) {
+      return data as ChunkedUploadResult;
+    }
+  }
+
+  throw new Error('Chunked upload did not complete cleanly.');
+}
+
 export async function createOptimizationJob(params: {
   file?: File | null;
   tempPath?: string | null;
   originalName: string;
   config: Partial<JobConfig>;
 }): Promise<{ jobId: string }> {
-  const formData = new FormData();
-  if (params.file) {
-    formData.append('video', params.file);
+  let fileToUpload = params.file ?? null;
+  let tempPath = params.tempPath ?? null;
+
+  // The source is no longer uploaded during analysis. If the user picked a
+  // file and it is too large for one request, assemble it server-side first.
+  if (fileToUpload && fileToUpload.size > DIRECT_UPLOAD_LIMIT_BYTES) {
+    const uploaded = await uploadFileInChunks(fileToUpload);
+    tempPath = uploaded.tempPath;
+    fileToUpload = null;
   }
-  if (params.tempPath) {
-    formData.append('tempPath', params.tempPath);
+
+  const formData = new FormData();
+  if (fileToUpload) {
+    formData.append('video', fileToUpload);
+  }
+  if (tempPath) {
+    formData.append('tempPath', tempPath);
   }
   formData.append('originalName', params.originalName);
   formData.append('config', JSON.stringify(params.config));
@@ -630,49 +676,9 @@ export async function uploadFileChunked(
   file: File,
   onProgress?: (percent: number) => void
 ): Promise<AnalysisResponse> {
-  const CHUNK_SIZE = 10 * 1024 * 1024; // 10 MB chunks
-  const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
-  const fileId = `${Date.now()}_${file.name.replace(/[^a-zA-Z0-9]/g, '')}`;
-
-  let finalResponse: AnalysisResponse | null = null;
-
-  for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
-    const start = chunkIndex * CHUNK_SIZE;
-    const end = Math.min(file.size, start + CHUNK_SIZE);
-    const chunk = file.slice(start, end);
-
-    const formData = new FormData();
-    formData.append('chunk', chunk);
-    formData.append('fileId', fileId);
-    formData.append('chunkIndex', chunkIndex.toString());
-    formData.append('totalChunks', totalChunks.toString());
-    formData.append('fileName', file.name);
-
-    const res = await fetch('/api/media/upload-chunk', {
-      method: 'POST',
-      body: formData,
-    });
-
-    if (!res.ok) {
-      throw new Error(`Upload failed on chunk ${chunkIndex + 1}/${totalChunks}`);
-    }
-
-    const data = await res.json();
-    if (onProgress) {
-      onProgress(Math.round(((chunkIndex + 1) / totalChunks) * 100));
-    }
-
-    if (data.completed) {
-      // Analyze the assembled file with optimizer
-      return await sendMediaToOptimizer(data.tempPath, data.originalName);
-    }
-  }
-
-  if (!finalResponse) {
-    throw new Error('Chunked upload did not complete cleanly.');
-  }
-
-  return finalResponse;
+  const uploaded = await uploadFileInChunks(file, onProgress);
+  // Analyze the assembled file with the optimizer.
+  return sendMediaToOptimizer(uploaded.tempPath, uploaded.originalName);
 }
 
 // ============================================================================

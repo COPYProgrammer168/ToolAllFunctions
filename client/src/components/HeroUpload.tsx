@@ -254,8 +254,8 @@ export const HeroUpload: React.FC<HeroUploadProps> = ({
                   </h3>
                   <p className="text-xs text-neutral-400 font-mono">
                     {isAnalyzing && uploadProgress > 0 && uploadProgress < 100
-                      ? `Uploading: ${uploadProgress}%`
-                      : 'Extracting codec, bitrate, motion vectors, color space...'}
+                      ? `Scanning video locally: ${uploadProgress}%`
+                      : 'Extracting codec, bitrate, resolution, frame rate, color space...'}
                   </p>
                 </div>
                 {uploadProgress > 0 && uploadProgress < 100 && (
