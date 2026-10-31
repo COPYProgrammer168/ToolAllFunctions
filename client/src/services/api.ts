@@ -104,6 +104,11 @@ async function postUploadChunk(
         (typeof body.error === 'string' && body.error) ||
         `Upload failed on chunk ${chunkIndex + 1}/${totalChunks} (HTTP ${res.status})`;
 
+      // Fail immediately if the backend is unreachable or missing
+      if (body.code === 'BACKEND_UNREACHABLE') {
+        throw new JobStartError(message, { status: res.status, code: body.code });
+      }
+
       // Retry only errors that may be temporary. A 400/413/415 will fail the
       // same way again and should be shown to the user immediately.
       if (res.status < 500 && res.status !== 429) {
@@ -326,13 +331,30 @@ export class MediaApiError extends Error {
   }
 }
 
-/** Reads a JSON error body, tolerating non-JSON responses. */
+/** Reads a JSON error body, tolerating non-JSON responses and preserving proxy/backend errors. */
 async function readErrorBody(res: Response): Promise<Record<string, any>> {
   try {
-    return (await res.json()) as Record<string, any>;
+    const text = await res.text();
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed && typeof parsed === 'object') return parsed;
+    } catch {
+      // Non-JSON response (e.g. Vite proxy ECONNREFUSED or gateway 502/504)
+      if (text.includes('ECONNREFUSED') || text.includes('http proxy error')) {
+        return {
+          error:
+            'Backend server is not running on port 3001. Please ensure the backend is started (e.g. npm run dev).',
+          code: 'BACKEND_UNREACHABLE',
+        };
+      }
+      if (text.trim()) {
+        return { error: text.slice(0, 300) };
+      }
+    }
   } catch {
-    return {};
+    // Network or streaming read error
   }
+  return {};
 }
 
 /** Number of seconds to wait, taken from the body (`retry_after`/`retryAfterSec`) or the header. */

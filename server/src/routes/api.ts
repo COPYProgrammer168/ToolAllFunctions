@@ -1096,62 +1096,103 @@ apiRouter.delete('/media/jobs/:id', async (req, res) => {
 const chunkMemoryStorage = multer.memoryStorage();
 const uploadChunk = multer({ storage: chunkMemoryStorage, limits: { fileSize: 50 * 1024 * 1024 } });
 
-apiRouter.post('/media/upload-chunk', uploadChunk.single('chunk'), async (req, res) => {
-  try {
-    const { fileId, chunkIndex, totalChunks, fileName } = req.body;
-    if (!fileId || chunkIndex === undefined || !totalChunks || !req.file) {
-      return res.status(400).json({ error: 'Missing chunk upload metadata.' });
-    }
+apiRouter.post(
+  '/media/upload-chunk',
+  (req, res, next) => {
+    uploadChunk.single('chunk')(req, res, (err: any) => {
+      if (err) {
+        if (err instanceof multer.MulterError) {
+          return res.status(400).json({ error: `Upload error: ${err.message}` });
+        }
+        return res.status(400).json({ error: err.message || 'Chunk upload failed.' });
+      }
+      next();
+    });
+  },
+  async (req, res) => {
+    try {
+      const { fileId, chunkIndex, totalChunks, fileName } = req.body;
+      if (!fileId || chunkIndex === undefined || totalChunks === undefined || !req.file) {
+        return res.status(400).json({ error: 'Missing chunk upload metadata.' });
+      }
 
-    const chunkIdx = parseInt(chunkIndex, 10);
-    const totalCount = parseInt(totalChunks, 10);
-    const chunkDir = path.join(UPLOAD_DIR, `chunks_${sanitizeFilename(fileId)}`);
-    await fs.mkdir(chunkDir, { recursive: true });
+      const chunkIdx = parseInt(chunkIndex, 10);
+      const totalCount = parseInt(totalChunks, 10);
+      if (
+        !Number.isInteger(chunkIdx) ||
+        !Number.isInteger(totalCount) ||
+        chunkIdx < 0 ||
+        totalCount <= 0 ||
+        chunkIdx >= totalCount
+      ) {
+        return res.status(400).json({ error: 'Invalid chunk upload indices.' });
+      }
 
-    // Write chunk
-    const chunkPath = path.join(chunkDir, `part_${chunkIdx}`);
-    await fs.writeFile(chunkPath, req.file.buffer);
+      const safeFileId = sanitizeFilename(String(fileId));
+      const chunkDir = path.join(UPLOAD_DIR, `chunks_${safeFileId}`);
+      await fs.mkdir(chunkDir, { recursive: true });
 
-    // If final chunk, assemble parts
-    if (chunkIdx === totalCount - 1) {
-      const ext = path.extname(fileName) || '.mp4';
-      const assembledName = `${Date.now()}_${nanoid(6)}${ext}`;
-      const assembledPath = path.join(UPLOAD_DIR, assembledName);
+      // Write chunk
+      const chunkPath = path.join(chunkDir, `part_${chunkIdx}`);
+      await fs.writeFile(chunkPath, req.file.buffer);
 
-      // Write each part and await completion instead of queuing every part in
-      // a write stream's buffer: a 200 MB+ source must not be held in memory.
-      const assembledFile = await fs.open(assembledPath, 'w');
-      try {
+      // If final chunk, assemble parts
+      if (chunkIdx === totalCount - 1) {
+        // Verify all parts exist before assembly
         for (let i = 0; i < totalCount; i++) {
           const partFile = path.join(chunkDir, `part_${i}`);
-          const partBuf = await fs.readFile(partFile);
-          await assembledFile.write(partBuf);
+          try {
+            await fs.access(partFile);
+          } catch {
+            return res.status(400).json({
+              error: `Chunk part ${i + 1}/${totalCount} is missing or expired. Please restart the upload.`,
+              code: 'CHUNK_MISSING',
+            });
+          }
         }
-      } catch (err) {
-        await assembledFile.close().catch(() => {});
-        await fs.rm(assembledPath, { force: true }).catch(() => {});
-        throw err;
+
+        const safeFileName = typeof fileName === 'string' && fileName.trim() ? fileName.trim() : 'video.mp4';
+        const ext = path.extname(safeFileName) || '.mp4';
+        const assembledName = `${Date.now()}_${nanoid(6)}${ext}`;
+        const assembledPath = path.join(UPLOAD_DIR, assembledName);
+
+        // Write each part and await completion instead of queuing every part in
+        // a write stream's buffer: a 200 MB+ source must not be held in memory.
+        const assembledFile = await fs.open(assembledPath, 'w');
+        try {
+          for (let i = 0; i < totalCount; i++) {
+            const partFile = path.join(chunkDir, `part_${i}`);
+            const partBuf = await fs.readFile(partFile);
+            await assembledFile.write(partBuf);
+          }
+        } catch (err) {
+          await assembledFile.close().catch(() => {});
+          await fs.rm(assembledPath, { force: true }).catch(() => {});
+          throw err;
+        }
+        await assembledFile.close();
+
+        // Cleanup chunks directory safely on Windows without throwing
+        await fs.rm(chunkDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }).catch((cleanupErr) => {
+          console.warn('Non-fatal error cleaning up chunk directory:', cleanupErr);
+        });
+        const stats = await fs.stat(assembledPath);
+
+        return res.json({
+          completed: true,
+          tempPath: assembledPath,
+          originalName: safeFileName,
+          sizeBytes: stats.size,
+        });
       }
-      await assembledFile.close();
 
-      // Cleanup chunks directory
-      await fs.rm(chunkDir, { recursive: true, force: true });
-      const stats = await fs.stat(assembledPath);
-
-      return res.json({
-        completed: true,
-        tempPath: assembledPath,
-        originalName: fileName,
-        sizeBytes: stats.size,
-      });
+      res.json({ completed: false, chunkIndex: chunkIdx });
+    } catch (err: any) {
+      console.error('Chunk upload error:', err);
+      res.status(500).json({ error: err.message || 'Failed to process chunk upload.' });
     }
-
-    res.json({ completed: false, chunkIndex: chunkIdx });
-  } catch (err: any) {
-    console.error('Chunk upload error:', err);
-    res.status(500).json({ error: err.message });
   }
-});
+);
 
 // L. Video to Audio Extraction (Smart bitrate & metadata)
 apiRouter.post('/audio/extract', async (req, res) => {
