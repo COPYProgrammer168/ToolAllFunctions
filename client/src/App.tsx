@@ -89,20 +89,20 @@ function App() {
   const [startError, setStartError] = useState<{ message: string; details?: string } | null>(null);
   const startLockRef = useRef(false);
   const [config, setConfig] = useState<Partial<JobConfig>>({
-    mode: 'smart',
+    mode: 'max_quality',
     scenario: 'realistic',
-    preset: 'tiktok',
-    targetResolution: 'original',
+    preset: 'custom',
+    targetResolution: '1080p',
     targetFps: 60,
-    aspectRatioStrategy: 'blur_background',
-    detail: 'natural',
-    denoise: 'low',
+    aspectRatioStrategy: 'preserve',
+    detail: 'sharp',
+    denoise: 'medium',
     deblocking: true,
     debanding: false,
     motion: '60fps',
-    color: 'natural',
-    audio: 'optimized',
-    loudnessNormalization: true,
+    color: 'cinematic',
+    audio: 'original',
+    loudnessNormalization: false,
   });
   const [activeTab, setActiveTab] = useState<'optimize' | 'compare' | 'inspect'>('optimize');
   const previewVideoRef = useRef<HTMLVideoElement>(null);

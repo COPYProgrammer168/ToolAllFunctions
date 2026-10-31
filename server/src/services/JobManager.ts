@@ -3,32 +3,25 @@ import fs from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import type { Response } from 'express';
 import { nanoid } from 'nanoid';
-import type { VideoMetadata, JobConfig, JobProgress, JobState } from '../types/index.js';
+import type { VideoMetadata, JobConfig, JobProgress, JobState, JobRecord } from '../types/index.js';
 import { VideoAnalyzer } from './VideoAnalyzer.js';
 import { OptimizationPlanner, type PlannedPipeline } from './OptimizationPlanner.js';
 import { FFmpegService } from './FFmpegService.js';
 import { QualityValidator } from './QualityValidator.js';
 import { HardwareDetector } from './HardwareDetector.js';
 import { STORAGE_ROOT } from '../utils/paths.js';
+import { loadOptimizationJobs, saveOptimizationJob, deleteOptimizationJobRow } from './JobDatabase.js';
 
 const BASE_STORAGE_DIR = STORAGE_ROOT;
 
-export interface JobRecord {
-  id: string;
-  jobDir: string;
-  inputPath: string;
-  outputPath: string;
-  meta: VideoMetadata;
-  config: JobConfig;
-  plan: PlannedPipeline;
-  progress: JobProgress;
-  createdAt: number;
-}
+export type { JobRecord };
 
 export class JobManager {
   private static jobs = new Map<string, JobRecord>();
   private static listeners = new Map<string, Set<Response>>();
   private static ffmpegService = new FFmpegService();
+  /** Tracks the last SQLite write timestamp per job for throttling. */
+  private static lastDbWrite = new Map<string, number>();
 
   /**
    * Serial execution queue for background jobs. Every optimization runs a
@@ -42,6 +35,29 @@ export class JobManager {
     await fs.mkdir(BASE_STORAGE_DIR, { recursive: true });
     await fs.mkdir(path.join(BASE_STORAGE_DIR, 'uploads'), { recursive: true });
     await fs.mkdir(path.join(BASE_STORAGE_DIR, 'jobs'), { recursive: true });
+
+    // Restore persisted optimization jobs from SQLite so that the client
+    // can still see terminal results (COMPLETED / FAILED) after a restart.
+    // Any job that was mid-flight when the server died is marked FAILED.
+    try {
+      const restored = loadOptimizationJobs();
+      for (const job of restored) {
+        this.jobs.set(job.id, job);
+        const state = job.progress.state;
+        if (state !== 'COMPLETED' && state !== 'FAILED' && state !== 'CANCELLED') {
+          job.progress = {
+            ...job.progress,
+            state: 'FAILED',
+            stageName: 'Server restarted during processing',
+            error: 'The server restarted while this job was running. Please start the optimization again.',
+          };
+          saveOptimizationJob(job);
+        }
+      }
+      console.log(`[JobManager] Restored ${restored.length} optimization job(s) from SQLite.`);
+    } catch (err) {
+      console.error('[JobManager] Failed to restore optimization jobs from SQLite:', err);
+    }
 
     // Periodic cleanup of jobs older than 2 hours
     setInterval(() => {
@@ -107,6 +123,7 @@ export class JobManager {
     };
 
     this.jobs.set(jobId, jobRecord);
+    saveOptimizationJob(jobRecord);
     return jobRecord;
   }
 
@@ -189,8 +206,24 @@ export class JobManager {
     const job = this.jobs.get(jobId);
     if (!job) return;
 
+    const prevState = job.progress.state;
     job.progress = { ...job.progress, ...partial };
     this.broadcast(jobId, job.progress);
+
+    // Persist to SQLite.  Always write on state transitions; during the
+    // PROCESSING state ffmpeg fires progress many times per second so
+    // throttle DB writes to once every 5 seconds.
+    const isStateChange = partial.state !== undefined && partial.state !== prevState;
+    const now = Date.now();
+    const lastWrite = this.lastDbWrite.get(jobId) ?? 0;
+    if (isStateChange || now - lastWrite >= 5_000) {
+      try {
+        saveOptimizationJob(job);
+        this.lastDbWrite.set(jobId, now);
+      } catch (err) {
+        console.warn(`[JobManager] Failed to persist progress for ${jobId}:`, err);
+      }
+    }
   }
 
   public static async startJob(jobId: string): Promise<void> {
@@ -298,7 +331,13 @@ export class JobManager {
       console.warn(`Error removing job dir for ${jobId}:`, err);
     }
     this.jobs.delete(jobId);
+    this.lastDbWrite.delete(jobId);
     this.listeners.delete(jobId);
+    try {
+      deleteOptimizationJobRow(jobId);
+    } catch (err) {
+      console.warn(`[JobManager] Failed to delete SQLite row for ${jobId}:`, err);
+    }
     return true;
   }
 

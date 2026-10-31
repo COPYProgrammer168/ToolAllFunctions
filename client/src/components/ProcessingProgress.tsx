@@ -5,12 +5,14 @@ import type { JobProgress } from '../types';
 interface ProcessingProgressProps {
   progress: JobProgress;
   onCancel: () => void;
+  presetLabel?: string;
 }
 
 const stateConfig: Record<string, { label: string; color: string }> = {
   UPLOADING: { label: 'Uploading', color: 'text-neutral-400' },
   ANALYZING: { label: 'Analyzing', color: 'text-neutral-300' },
-  PLANNING: { label: 'Planning', color: 'text-neutral-300' },
+PLANNING: { label: 'Planning', color: 'text-neutral-300' },
+  QUEUED: { label: 'Queued', color: 'text-neutral-400' },
   PROCESSING: { label: 'Processing', color: 'text-white' },
   ENHANCING: { label: 'Enhancing', color: 'text-white' },
   UPSCALING: { label: 'Upscaling', color: 'text-neutral-300' },

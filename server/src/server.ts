@@ -94,8 +94,18 @@ async function startServer() {
     console.log(`[clientDist] assets=${fs.readdirSync(assetsDir).join(', ')}`);
   }
 
-  app.listen(PORT, () => {
+  const server = app.listen(PORT, () => {
     console.log(`Server listening on http://localhost:${PORT}`);
+  });
+
+  server.on('error', (err: NodeJS.ErrnoException) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`[FATAL] Port ${PORT} is already in use — another backend instance is still running.`);
+      console.error('Stop the other instance (or set a different PORT env var) and restart.');
+      process.exit(1);
+    }
+    console.error('[FATAL] Server listen error:', err);
+    process.exit(1);
   });
 }
 

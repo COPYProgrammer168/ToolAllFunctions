@@ -124,6 +124,7 @@ export class OptimizationPlanner {
       config.detail = 'soft';
       config.denoise = 'low';
       config.debanding = false;
+      config.deblocking = false; // deblock filter is CPU-costly; skip in Fast
       if (meta.fps >= 50) config.motion = 'off';
     } else if (mode === 'max_quality') {
       config.detail = 'sharp';
@@ -225,18 +226,29 @@ export class OptimizationPlanner {
     // Determine target FPS & Interpolation
     let interpolateMode: 'none' | 'mci' | 'blend' = 'none';
 
-    if (config.targetFps === 60 || config.motion === '60fps' || config.motion === 'very_smooth') {
+    // ffmpeg's motion-compensated interpolation (minterpolate mi_mode=mci) is
+    // CPU-only and effectively single-threaded: ~2-5 FPS at 1080p, so a
+    // 2-minute clip takes 45+ minutes. Frame blending (mi_mode=blend) runs at
+    // 40-60+ FPS with minor ghosting on fast motion. Reserve MCI for Max
+    // Quality; Fast/Balanced use blend so jobs finish in minutes, not an hour.
+    const wantsInterpolation =
+      config.targetFps === 60 || config.motion === '60fps' || config.motion === 'very_smooth';
+
+    if (wantsInterpolation) {
       if (meta.fps < 50) {
         targetFps = 60;
-        interpolateMode = mciAllowed ? 'mci' : 'blend';
-        if (mciAllowed) {
+        if (mode === 'max_quality' && mciAllowed) {
+          interpolateMode = 'mci';
           warnings.push(
-            `Frame Interpolation: Synthesizing intermediate frames (${meta.fps} → 60 FPS). Fast erratic motion may show slight blending.`
+            'Max Quality motion-compensated interpolation (MCI) is CPU-bound at ~2-5 FPS — a 2-minute video can take 45+ minutes. Use Balanced (frame blending) for near-real-time speed.'
           );
         } else {
-          warnings.push(
-            `Motion interpolation downgraded to frame blending: full motion-compensated interpolation needs ~${mciPeakMB}MB but this server only has ${memoryBudgetMB}MB available.`
-          );
+          interpolateMode = 'blend';
+          if (mode === 'max_quality') {
+            warnings.push(
+              `Motion interpolation downgraded to frame blending: full MCI needs ~${mciPeakMB}MB but this server only has ${memoryBudgetMB}MB available.`
+            );
+          }
         }
       } else {
         targetFps = Math.round(meta.fps);
@@ -245,8 +257,9 @@ export class OptimizationPlanner {
     } else if (typeof config.targetFps === 'number') {
       targetFps = config.targetFps;
       if (targetFps > meta.fps + 5) {
-        interpolateMode = mciAllowedFor(targetFps) ? 'mci' : 'blend';
-        if (!mciAllowedFor(targetFps)) {
+        const mciOk = mciAllowedFor(targetFps);
+        interpolateMode = mode === 'max_quality' && mciOk ? 'mci' : 'blend';
+        if (interpolateMode === 'blend' && mode === 'max_quality') {
           warnings.push(
             `Motion interpolation downgraded to frame blending: this server (~${memoryBudgetMB}MB) cannot run motion-compensated interpolation at ${meta.width}×${meta.height}.`
           );

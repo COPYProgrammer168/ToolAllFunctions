@@ -14,11 +14,26 @@ export type ProgressCallback = (progress: Partial<JobProgress>) => void;
 /** Vertical 9:16 canvas presets (TikTok/Reels/Shorts family). */
 const VERTICAL_CANVAS_PRESETS = new Set(['tiktok', 'tiktok_4k', 'reels', 'shorts']);
 
+/** NVENC preset by processing mode: Fast=p3, Balanced=p4, Quality=p6. */
+function nvencPreset(mode?: string): 'p3' | 'p4' | 'p6' {
+  if (mode === 'fast') return 'p3';
+  if (mode === 'max_quality') return 'p6';
+  return 'p4';
+}
+
 export class FFmpegService {
   private activeProcesses = new Map<string, ChildProcess>();
+  /**
+   * Jobs cancelled through cancel(). On Windows a taskkill'd process closes
+   * with signal=null (not 'SIGKILL'), so the close handler alone cannot tell a
+   * cancelled job from a crashed one — without this set, cancelling used to
+   * fall through to the libx264 CPU fallback and silently restart the encode.
+   */
+  private cancelledJobs = new Set<string>();
 
   public cancel(jobId: string): boolean {
     const proc = this.activeProcesses.get(jobId);
+    this.cancelledJobs.add(jobId);
     if (!proc || !proc.pid) return false;
 
     try {
@@ -298,7 +313,7 @@ export class FFmpegService {
     if (encoder === 'h264_nvenc') {
       args.push(
         '-c:v', 'h264_nvenc',
-        '-preset', plan.config.mode === 'fast' ? 'p3' : 'p6',
+        '-preset', nvencPreset(plan.config.mode),
         '-tune', 'hq',
         '-rc', 'vbr',
         '-cq', String(plan.encoding.crf),
@@ -476,11 +491,20 @@ export class FFmpegService {
         reject(err);
       });
 
-      proc.on('close', (code, signal) => {
-        clearWatchdog();
-        this.activeProcesses.delete(jobId);
+        proc.on('close', (code, signal) => {
+          clearWatchdog();
+          this.activeProcesses.delete(jobId);
 
-        if (killedForMemory) {
+          // Cancellation is tracked explicitly: on Windows taskkill produces
+          // signal=null, which the SIGKILL check below cannot see.
+          if (this.cancelledJobs.has(jobId)) {
+            this.cancelledJobs.delete(jobId);
+            const err: any = new Error('Job was cancelled by user');
+            err.isCancelled = true;
+            return reject(err);
+          }
+
+          if (killedForMemory) {
           const err: any = new Error(
             `The encoder exceeded this server's ${HardwareDetector.memoryBudgetMB()}MB memory budget. ` +
               'Try Fast Optimize, a lower target resolution, or the 5-second preview.'

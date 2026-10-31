@@ -22,7 +22,19 @@ function getDb() {
       progress TEXT,
       downloadMeta TEXT,
       customBitrate INTEGER
-    )
+    );
+
+    CREATE TABLE IF NOT EXISTS optimization_jobs (
+      id TEXT PRIMARY KEY,
+      jobDir TEXT,
+      inputPath TEXT,
+      outputPath TEXT,
+      meta TEXT,
+      config TEXT,
+      plan TEXT,
+      progress TEXT,
+      createdAt INTEGER
+    );
   `);
     // Migrate databases created before the audio bitrate was persisted — resume
     // needs it to re-encode a paused music job to the requested kbps.
@@ -107,4 +119,52 @@ export function saveJob(job) {
 export function deleteJobRow(id) {
     const db = getDb();
     db.prepare('DELETE FROM media_jobs WHERE id = ?').run(id);
+}
+export function loadOptimizationJobs() {
+    const db = getDb();
+    const rows = db.prepare('SELECT * FROM optimization_jobs ORDER BY createdAt DESC').all();
+    return rows
+        .map((r) => {
+        try {
+            return {
+                id: r.id,
+                jobDir: r.jobDir,
+                inputPath: r.inputPath,
+                outputPath: r.outputPath,
+                meta: JSON.parse(r.meta),
+                config: JSON.parse(r.config),
+                plan: JSON.parse(r.plan),
+                progress: JSON.parse(r.progress),
+                createdAt: Number(r.createdAt),
+            };
+        }
+        catch (err) {
+            console.warn('Skipping corrupted optimization job record:', r.id, err);
+            return null;
+        }
+    })
+        .filter((j) => j !== null);
+}
+export function saveOptimizationJob(job) {
+    const db = getDb();
+    db.prepare(`INSERT INTO optimization_jobs (id, jobDir, inputPath, outputPath, meta, config, plan, progress, createdAt)
+     VALUES (@id, @jobDir, @inputPath, @outputPath, @meta, @config, @plan, @progress, @createdAt)
+     ON CONFLICT(id) DO UPDATE SET
+       jobDir=excluded.jobDir, inputPath=excluded.inputPath, outputPath=excluded.outputPath,
+       meta=excluded.meta, config=excluded.config, plan=excluded.plan,
+       progress=excluded.progress, createdAt=excluded.createdAt`).run({
+        id: job.id,
+        jobDir: job.jobDir,
+        inputPath: job.inputPath,
+        outputPath: job.outputPath,
+        meta: JSON.stringify(job.meta),
+        config: JSON.stringify(job.config),
+        plan: JSON.stringify(job.plan),
+        progress: JSON.stringify(job.progress),
+        createdAt: job.createdAt,
+    });
+}
+export function deleteOptimizationJobRow(id) {
+    const db = getDb();
+    db.prepare('DELETE FROM optimization_jobs WHERE id = ?').run(id);
 }

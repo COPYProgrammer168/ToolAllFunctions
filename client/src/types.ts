@@ -85,6 +85,7 @@ export type JobState =
   | 'UPLOADING'
   | 'ANALYZING'
   | 'PLANNING'
+  | 'QUEUED'
   | 'PROCESSING'
   | 'ENHANCING'
   | 'UPSCALING'
