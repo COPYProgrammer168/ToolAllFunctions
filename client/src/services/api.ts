@@ -104,8 +104,8 @@ async function postUploadChunk(
         (typeof body.error === 'string' && body.error) ||
         `Upload failed on chunk ${chunkIndex + 1}/${totalChunks} (HTTP ${res.status})`;
 
-      // Fail immediately if the backend is unreachable or missing
-      if (body.code === 'BACKEND_UNREACHABLE') {
+      // Fail immediately if the backend is unreachable or chunks are missing
+      if (body.code === 'BACKEND_UNREACHABLE' || body.code === 'CHUNK_MISSING') {
         throw new JobStartError(message, { status: res.status, code: body.code });
       }
 
@@ -206,14 +206,6 @@ export async function createOptimizationJob(params: {
   let fileToUpload = originalFile;
   let tempPath = params.tempPath ?? null;
 
-  // The source is no longer uploaded during analysis. If the user picked a
-  // file and it is too large for one request, assemble it server-side first.
-  if (fileToUpload && fileToUpload.size > DIRECT_UPLOAD_LIMIT_BYTES) {
-    const uploaded = await uploadFileInChunks(fileToUpload, params.onUploadProgress);
-    tempPath = uploaded.tempPath;
-    fileToUpload = null;
-  }
-
   const buildFormData = () => {
     const formData = new FormData();
     if (fileToUpload) {
@@ -227,25 +219,50 @@ export async function createOptimizationJob(params: {
     return formData;
   };
 
-  try {
-    return await requestOptimizationJob(buildFormData());
-  } catch (err) {
-    // Vercel containers are ephemeral and may serve the chunk upload and the
-    // job creation from different instances. The server reports that case as
-    // UPLOAD_EXPIRED; re-upload once and retry rather than failing the click.
-    const canRetry =
-      err instanceof JobStartError &&
-      err.code === 'UPLOAD_EXPIRED' &&
-      !!originalFile &&
-      originalFile.size > DIRECT_UPLOAD_LIMIT_BYTES;
+  const uploadAndStart = async (isRetry = false): Promise<{ jobId: string }> => {
+    // The source is no longer uploaded during analysis. If the user picked a
+    // file and it is too large for one request, assemble it server-side first.
+    if (fileToUpload && fileToUpload.size > DIRECT_UPLOAD_LIMIT_BYTES) {
+      try {
+        const uploaded = await uploadFileInChunks(fileToUpload, params.onUploadProgress);
+        tempPath = uploaded.tempPath;
+        fileToUpload = null;
+      } catch (uploadErr) {
+        if (
+          !isRetry &&
+          uploadErr instanceof JobStartError &&
+          uploadErr.code === 'CHUNK_MISSING' &&
+          !!originalFile
+        ) {
+          fileToUpload = originalFile;
+          tempPath = null;
+          return uploadAndStart(true);
+        }
+        throw uploadErr;
+      }
+    }
 
-    if (!canRetry) throw err;
+    try {
+      return await requestOptimizationJob(buildFormData());
+    } catch (err) {
+      // Vercel/Render containers are ephemeral and may serve chunk upload and
+      // job creation from different instances. Re-upload once if missing or expired.
+      const canRetry =
+        !isRetry &&
+        err instanceof JobStartError &&
+        (err.code === 'UPLOAD_EXPIRED' || err.code === 'CHUNK_MISSING') &&
+        !!originalFile &&
+        originalFile.size > DIRECT_UPLOAD_LIMIT_BYTES;
 
-    const uploaded = await uploadFileInChunks(originalFile, params.onUploadProgress);
-    tempPath = uploaded.tempPath;
-    fileToUpload = null;
-    return requestOptimizationJob(buildFormData());
-  }
+      if (!canRetry) throw err;
+
+      fileToUpload = originalFile;
+      tempPath = null;
+      return uploadAndStart(true);
+    }
+  };
+
+  return uploadAndStart(false);
 }
 
 export async function cancelJob(jobId: string): Promise<boolean> {
